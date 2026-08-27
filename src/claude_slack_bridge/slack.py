@@ -116,6 +116,28 @@ def conversations_info(token: str, channel: str) -> dict:
     return api(token, "conversations.info", {"channel": channel})
 
 
+def probe(token: str, channel: str) -> dict:
+    """보낼 곳에 실제로 접근되는지 확인한다.
+
+    DM 에는 conversations.info 를 쓰지 않는다. IM 에 대해서는 im:read 를 요구해
+    invalid_arguments 로 떨어지는데, 그 스코프를 넣으면 이미 설치한 사람이 앱을
+    다시 설치해야 한다. 대신 읽기를 한 번 해보는 것으로 접근 가능 여부를 대신한다
+    (im:history 는 어차피 답장을 받으려고 이미 갖고 있다).
+    """
+    if channel.startswith("D"):
+        conversations_history(token, channel, oldest="0")
+        return {"kind": "dm", "label": "봇과의 DM", "ready": True}
+
+    info = api(token, "conversations.info", {"channel": channel}).get("channel", {})
+    name = info.get("name", "?")
+    return {
+        "kind": "channel",
+        "label": f"#{name}",
+        "name": name,
+        "ready": bool(info.get("is_member")),
+    }
+
+
 def conversations_open(token: str, user_id: str) -> str:
     """봇과 사용자의 1:1 DM 을 열고 그 대화 ID(`D...`)를 돌려준다.
 

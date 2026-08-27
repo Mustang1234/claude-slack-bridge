@@ -9,6 +9,8 @@ Claude Code 가 stdio 로 이 프로세스를 띄우고, 세션이 끝나면 같
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.mcpserver import MCPServer
 
 from . import chat as chatmod
@@ -26,7 +28,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.7.0",
+    version="0.9.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -79,18 +81,17 @@ def slack_check() -> str:
         return SETUP_HINT
     try:
         who = slack.auth_test(conf.bot_token)
-        info = slack.conversations_info(conf.bot_token, conf.channel)
+        target = slack.probe(conf.bot_token, conf.channel)
     except slack.SlackError as e:
         return f"확인 실패.\n{e}"
 
-    ch = info.get("channel", {})
-    member = ch.get("is_member")
     lines = [
         f"워크스페이스: {who.get('team', '?')}",
         f"봇: {who.get('user', '?')}",
-        f"채널: #{ch.get('name', '?')} ({conf.channel})",
-        f"봇 초대됨: {'예' if member else '아니오 — /invite 필요'}",
+        f"받는 곳: {target['label']} ({conf.channel})",
     ]
+    if target["kind"] == "channel":
+        lines.append(f"봇 초대됨: {'예' if target['ready'] else '아니오 — /invite 필요'}")
     return "\n".join(lines)
 
 
@@ -123,6 +124,9 @@ def slack_chat_open(hours: float = 4.0, label: str | None = None) -> str:
     conf = cfg.load()
     if conf is None:
         return SETUP_HINT
+    # 라벨이 없으면 작업 디렉터리 이름을 쓴다. 세션이 여럿일 때 폰에서 스레드를
+    # 구분하는 유일한 단서라, 비워두면 넷 다 같은 이름으로 보인다.
+    label = label or os.path.basename(os.getcwd()) or None
     try:
         c = chatmod.open_chat(conf.bot_token, conf.channel, hours, label)
     except slack.SlackError as e:

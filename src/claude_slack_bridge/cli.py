@@ -266,20 +266,15 @@ def cmd_doctor(argv: list[str]) -> None:
     print(f"채널: {conf.channel}")
     try:
         who = slack.auth_test(conf.bot_token)
-        info = slack.conversations_info(conf.bot_token, conf.channel).get("channel", {})
+        target = slack.probe(conf.bot_token, conf.channel)
     except slack.SlackError as e:
         _die(f"\n확인 실패.\n{e}")
 
     print(f"워크스페이스: {who.get('team')}")
     print(f"봇: {who.get('user')}")
-    if info.get("is_im"):
-        # DM 에는 멤버십 개념이 없다. 초대 검사를 하면 항상 실패로 읽힌다.
-        print("받는 곳: 봇과의 DM")
-    else:
-        print(f"채널명: #{info.get('name')}")
-        if not info.get("is_member"):
-            _die(f"봇이 채널에 없습니다.\n  → /invite @{who.get('user')}")
-        print("봇 초대됨: 예")
+    print(f"받는 곳: {target['label']}")
+    if target["kind"] == "channel" and not target["ready"]:
+        _die(f"봇이 채널에 없습니다.\n  → /invite @{who.get('user')}")
     print("\n정상입니다.")
 
 

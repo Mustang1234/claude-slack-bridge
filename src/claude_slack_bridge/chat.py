@@ -27,7 +27,7 @@ DEFAULT_HOURS = 4.0
 @dataclass
 class Chat:
     channel: str
-    thread_ts: str          # DM 에서는 비어 있다 (아래 is_im 주석 참고)
+    thread_ts: str          # 이 세션의 스레드. 슬롯 번호를 대신하는 식별자다.
     deadline: float
     is_im: bool = False
     anchor_ts: str = ""     # 이 시각 이후의 메시지만 읽는다
@@ -42,9 +42,12 @@ class Chat:
     def reply_thread(self) -> str | None:
         """보낼 때 붙일 thread_ts.
 
-        채널에서는 스레드로 묶어야 다른 세션과 섞이지 않는다. DM 은 상대가
-        나 하나뿐이라 섞일 일이 없고, 오히려 스레드로 묶으면 폰에서 답장하려면
-        스레드를 열어야 해서 번거로워진다.
+        DM 이든 채널이든 스레드로 묶는다. 세션이 여럿이면 — Claude Code 창을
+        네 개 띄우는 식으로 — 한 대화에 네 세션의 말이 섞여 어느 작업의
+        이야기인지 구분할 수 없게 된다. 스레드가 그 구분선이다.
+
+        답장할 때 스레드를 한 번 열어야 하는 번거로움은 있지만, 섞인 대화에서
+        무엇에 답하는지 매번 밝히는 쪽이 더 번거롭다.
         """
         return self.thread_ts or None
 
@@ -71,16 +74,23 @@ def fmt_remaining(seconds: float) -> str:
 def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat:
     """대화를 열어 이 세션에 묶는다.
 
-    채널이면 스레드를 파고, DM 이면 그냥 대화 자체를 쓴다.
+    스레드 하나가 세션 하나다. ntfy 의 슬롯 여덟 개가 하던 일을 스레드가 하되,
+    개수 제한이 없으므로 미리 만들어 둘 것도 반납할 것도 없다. 필요할 때 열고,
+    끝나면 종료 표시만 남긴다.
     """
     global _chat
     is_im = channel.startswith("D")
     head = label or "Claude 세션"
-    guide = "여기에 답장하면 세션이 이어받습니다." if is_im else "이 스레드에 답글을 달면 세션이 이어받습니다."
-    res = slack.post_message(token, channel, f"*{head}* — 대화를 엽니다.\n{guide}")
+    until = time.strftime("%H:%M", time.localtime(time.time() + hours * 3600))
+    res = slack.post_message(
+        token,
+        channel,
+        f"*{head}* — 대화를 엽니다. (마감 {until})\n"
+        "이 메시지의 스레드에 답글을 달면 이 세션이 이어받습니다.",
+    )
     _chat = Chat(
         channel=channel,
-        thread_ts="" if is_im else res["ts"],
+        thread_ts=res["ts"],
         deadline=time.time() + hours * 3600,
         is_im=is_im,
         anchor_ts=res["ts"],
@@ -88,12 +98,27 @@ def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat
     return _chat
 
 
-def close_chat(token: str, reason: str = "대화를 닫습니다.") -> None:
+CLOSE_MARK = "🔒 *종료된 스레드*"
+
+
+def close_chat(token: str, reason: str = "작업이 끝났습니다") -> None:
+    """대화를 닫는다. 스레드는 지우지 않고 종료 표시만 남긴다.
+
+    ntfy 는 토픽이 여덟 개뿐이라 반납하지 않으면 다음 세션이 채널을 못 열었다.
+    스레드는 개수 제한이 없으므로 회수할 이유가 없고, 남겨두면 무슨 작업이
+    어떻게 끝났는지 나중에 그대로 읽을 수 있다.
+    """
     global _chat
     if _chat is None:
         return
+    stamp = time.strftime("%H:%M")
     try:
-        slack.post_message(token, _chat.channel, reason, thread_ts=_chat.reply_thread)
+        slack.post_message(
+            token,
+            _chat.channel,
+            f"{CLOSE_MARK} — {reason} ({stamp})\n이 스레드에 답글을 달아도 이제 읽지 않습니다.",
+            thread_ts=_chat.reply_thread,
+        )
     except slack.SlackError:
         # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
         # 있는 쪽이 나쁘다.
@@ -139,11 +164,16 @@ def describe(msg: dict) -> str:
 
 
 def poll_new(token: str, chat: Chat) -> list[dict]:
-    """아직 못 본 메시지를 가져온다."""
-    if chat.is_im:
-        msgs = slack.conversations_history(token, chat.channel, oldest=chat.anchor_ts)
-    else:
+    """아직 못 본 메시지를 가져온다.
+
+    스레드가 있으면 그 스레드만 본다. 그래야 세션 넷이 같은 DM 을 써도 서로의
+    답장을 집어가지 않는다. 스레드가 없는 경우(대화를 열지 않고 알림만 쓰는
+    경우)에만 대화 전체를 훑는다.
+    """
+    if chat.thread_ts:
         msgs = slack.conversations_replies(token, chat.channel, chat.thread_ts)
+    else:
+        msgs = slack.conversations_history(token, chat.channel, oldest=chat.anchor_ts)
 
     fresh = []
     for m in msgs:
@@ -174,7 +204,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
         now = time.time()
 
         if chat.remaining <= 0:
-            close_chat(token, "마감 시각이 지나 닫습니다.")
+            close_chat(token, "마감 시각 도달")
             return "closed", []
 
         if not chat.warned and chat.remaining <= WARN_LEAD:
