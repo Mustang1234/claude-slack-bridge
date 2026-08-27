@@ -256,20 +256,21 @@ def extend(token: str, hours: float) -> Chat:
     return chat
 
 
-def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: str) -> None:
+def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: str) -> bool:
     """스레드를 닫는다 — 지우지 않고 표시만 남긴다.
 
     머리글에 취소선을 긋는 이유: 답글로만 "닫혔다" 고 적으면 스레드를 펼쳐야
     알 수 있다. 머리글이 그어져 있으면 대화 목록에서 바로 보인다.
     """
     stamp = time.strftime("%H:%M")
+    notified = True
     try:
         slack.chat_update(
             token, channel, thread_ts,
             f"~*{label}* — 종료됨 ({stamp})~\n_{reason}_",
         )
     except slack.SlackError:
-        pass
+        notified = False
     try:
         slack.post_message(
             token, channel,
@@ -279,8 +280,9 @@ def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: s
     except slack.SlackError:
         # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
         # 있는 쪽이 나쁘다.
-        pass
+        notified = False
     threads.patch(thread_ts, closed=True, closed_at=time.time(), reason=reason)
+    return notified
 
 
 def close_chat(token: str, reason: str = "작업이 끝났습니다") -> None:

@@ -471,6 +471,18 @@ def cmd_keeper(argv: list[str]) -> None:
         while True:
             if parent and not _pid_alive(int(parent)):
                 print("PARENT_GONE")
+                current = threads.load(thread) or state
+                if current.get("closed"):
+                    return
+                last_seen = float(current.get("last_seen_ts") or 0)
+                unread = threads.read_inbox(thread, last_seen)
+                reason = "Claude 세션 종료"
+                if unread:
+                    reason += f"\n읽지 못한 메시지: {len(unread)}건"
+                if not chat.close_thread(
+                    conf.bot_token, channel, thread, label, reason,
+                ):
+                    print("PARENT_CLOSE_FAILED")
                 return
 
             state = threads.load(thread) or state
@@ -583,8 +595,14 @@ def cmd_keeper(argv: list[str]) -> None:
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    except OSError:
+        # 판정 불가를 죽음으로 보면 살아 있는 대화를 닫는다. 마감까지 스레드가
+        # 남는 편이 사용자의 말을 조기에 끊는 것보다 복구하기 쉽다.
+        return True
     return True
 
 

@@ -10,6 +10,7 @@ Claude Code 가 stdio 로 이 프로세스를 띄우고, 세션이 끝나면 같
 from __future__ import annotations
 
 import os
+import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
@@ -41,6 +42,7 @@ Slack 을 듣는 것은 지킴이 하나뿐이라, 순서를 뒤집으면 감시
 keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 지키는 쪽도 지킴이
 하나뿐이라, 죽은 채 두면 마감이 지나도 스레드가 닫히지 않는다. 감시자가 죽어 있어도
 지킴이가 답장을 파일에 남기므로 다음 감시자가 이어받는다. 잃는 것은 즉시성뿐이다.
+세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack 스레드도 닫는다.
 
 세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
 아니라 `slack_chat_attach` 를 쓴다. 새로 열면 폰에 같은 작업의 스레드가 쌓인다.
@@ -59,7 +61,7 @@ keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.20.0",
+    version="0.22.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -162,6 +164,51 @@ def _bot_user_id(token: str) -> str:
 _BOT_ID = ""
 
 
+def _keeper_parent_arg() -> str:
+    self_pid = os.getpid()
+    fallback = f" --parent-pid {self_pid}"
+    try:
+        result = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return fallback
+    if result.returncode != 0:
+        return fallback
+
+    processes = {}
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid, parent = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        processes[pid] = (parent, fields[2])
+
+    # 실측에서는 claude와 MCP 서버 사이에 uvx가 있고, 셸까지 끼는 경우도 있었다.
+    # 실행 파일 이름을 정확히 비교해야 이름에 claude가 든 이 서버를 세션으로
+    # 오인하지 않는다.
+    pid = self_pid
+    for _ in range(6):
+        process = processes.get(pid)
+        if not process:
+            break
+        parent, command = process
+        executable = command.lstrip().split(None, 1)[0]
+        if os.path.basename(executable) == "claude":
+            return f" --parent-pid {pid}"
+        if parent <= 1 or parent == pid:
+            break
+        pid = parent
+
+    # 세션을 못 찾았을 때 중간 래퍼를 찍으면 래퍼만 먼저 죽어 대화를 조기에
+    # 닫을 수 있다. 세션과 함께 죽는 MCP 서버 자신이 더 안전한 대리다.
+    return fallback
+
+
 @server.tool(
     name="slack_chat_open",
     title="폰과 대화 열기",
@@ -203,11 +250,12 @@ def slack_chat_open(
     # 어느 스레드를 지켜볼지 알아야 한다. MCP 툴은 내가 부를 때만 도는 pull 이라
     # 그것만으로는 작업 중에 오는 메시지를 알아채지 못한다.
     where = "DM" if c.channel.startswith("D") else c.channel
+    parent_arg = _keeper_parent_arg()
     return (
         f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
         "다음 둘을 반드시 이 순서대로 띄운다. 뒤집으면 watch가 NO_KEEPER로 즉시 끝난다:\n"
-        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}   (떼어냄 — Esc 에 안 죽음)\n"
+        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}   (떼어냄 — Esc 에 안 죽음)\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)"
     )
 
@@ -283,11 +331,12 @@ def slack_chat_attach(
         return f"붙지 못했습니다.\n{e}"
 
     where = "DM" if c.channel.startswith("D") else c.channel
+    parent_arg = _keeper_parent_arg()
     return (
         f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
         "다음 둘을 반드시 이 순서대로 띄우세요. 뒤집으면 watch가 NO_KEEPER로 즉시 끝납니다:\n"
-        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}\n"
+        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}"
     )
 
