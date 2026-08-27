@@ -128,6 +128,20 @@ def cmd_init(argv: list[str]) -> None:
     token = getpass.getpass("Bot User OAuth Token (입력은 표시되지 않습니다): ").strip()
     if not token:
         _die("토큰이 비었습니다.")
+    # 토큰 종류를 접두사로 먼저 가른다. 종류가 틀리면 auth.test 는 통과하고
+    # 정작 메시지를 보낼 때 권한 오류가 나서, 원인이 한참 뒤에 드러난다.
+    if token.startswith("xoxp-"):
+        _die(
+            "이건 사용자 토큰(User OAuth Token)입니다. 봇 토큰이 필요합니다.\n\n"
+            "  → OAuth & Permissions 페이지의 'OAuth Tokens for Your Workspace' 에서\n"
+            "     'User OAuth Token' 이 아니라 'Bot User OAuth Token' 을 복사하세요.\n"
+            "     xoxb- 로 시작합니다."
+        )
+    if token.startswith("xapp-"):
+        _die(
+            "이건 앱 레벨 토큰(App-Level Token)입니다. 이 도구는 쓰지 않습니다.\n\n"
+            "  → OAuth & Permissions 의 'Bot User OAuth Token'(xoxb-)을 복사하세요."
+        )
     if not token.startswith("xoxb-"):
         print("  경고: xoxb- 로 시작하지 않습니다. 봇 토큰이 맞는지 확인하세요.\n")
 
