@@ -149,6 +149,20 @@ def cmd_init(argv: list[str]) -> None:
         who = slack.auth_test(token)
     except slack.SlackError as e:
         _die(f"토큰 확인 실패.\n{e}\n\n  → 1단계 6번의 Bot User OAuth Token 을 다시 확인하세요.")
+
+    # 접두사보다 이쪽이 확실하다. 봇 토큰이면 auth.test 응답에 bot_id 가 있고,
+    # 사용자 토큰이면 없다. 접두사가 낯선 토큰도 여기서 걸린다.
+    if not who.get("bot_id"):
+        _die(
+            f"이 토큰은 봇이 아니라 사용자({who.get('user')}) 자격입니다.\n\n"
+            "  → Slack 앱의 OAuth & Permissions 페이지에서\n"
+            "     'OAuth Tokens for Your Workspace' 항목을 보세요.\n"
+            "     위쪽 'Bot User OAuth Token' 이 필요한 것이고,\n"
+            "     아래쪽 'User OAuth Token' 은 아닙니다.\n\n"
+            "  Bot User OAuth Token 항목이 아예 없다면 앱이 워크스페이스에 설치되지\n"
+            "  않았거나 봇 사용자가 만들어지지 않은 것입니다."
+        )
+
     print(f"  워크스페이스: {who.get('team')}")
     print(f"  봇 이름: {who.get('user')}\n")
 
