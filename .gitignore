@@ -1,0 +1,33 @@
+# 자격증명 — 이 레포는 나중에 공개된다.
+# 한 번 커밋되면 이력에서 지워지지 않으므로, 값이 담기는 파일 패턴을 원천 차단한다.
+# 중간 슬래시 없는 패턴도 하위 디렉터리까지 걸리도록 **/ 로 적는다.
+**/config.json
+**/credentials*.json
+**/secrets.*
+.env
+**/*.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+
+# 예시 파일은 값이 없으므로 커밋한다 (위 규칙보다 뒤에 와야 이긴다)
+!**/config.example.json
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node (배포 래퍼를 붙일 경우 대비)
+node_modules/
+
+# macOS
+.DS_Store
