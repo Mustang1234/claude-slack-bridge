@@ -36,34 +36,54 @@ def read_manifest() -> str:
     )
 
 
-STEP1 = """\
-━━ 1단계 · Slack 에 봇 등록하고 토큰 받기 (브라우저) ━━
+STEP1_HEAD = """\
+━━ 1단계 · Slack 에 봇 만들기 (브라우저) ━━
 
   여기서 "앱"은 프로그램이 아니라 워크스페이스에 등록하는 봇 계정이다.
-  개발하거나 설치할 것은 없고, 마지막에 토큰 문자열 하나를 받는 게 목적이다.
+  개발하거나 내려받을 것은 없다. 브라우저에서 양식을 채우면 끝난다.
 
-  1) https://api.slack.com/apps 접속 (Slack 로그인 상태로)
-  2) Create New App  →  From an app manifest
-  3) 워크스페이스 선택  →  Next
-  4) 아래 명령으로 매니페스트를 출력해 통째로 붙여넣기  →  Next  →  Create
+  1) 브라우저로 https://api.slack.com/apps 를 연다
+     - Slack 에 로그인돼 있어야 한다. 아니면 로그인 화면이 먼저 뜬다.
+     - 앱을 만든 적이 없으면 목록이 비어 있다. 정상이다.
 
-       claude-slack-bridge manifest
+  2) 초록색 'Create New App' 버튼을 누른다
 
-     봇 이름을 바꾸고 싶으면 이렇게 한다 (기본값은 Claude Bridge):
+  3) 팝업에서 'From an app manifest' 를 고른다
+     - 'From scratch' 가 아니다. 그쪽으로 만들면 봇 사용자가 생기지 않아
+       나중에 Bot User OAuth Token 줄이 아예 나오지 않는다.
 
-       claude-slack-bridge manifest --name "내 비서"
+  4) 워크스페이스를 고르고 Next
 
-  5) 왼쪽 메뉴 OAuth & Permissions  →  Install to Workspace  →  Allow
-  6) Bot User OAuth Token 복사 (xoxb- 로 시작)
+  5) YAML 을 붙여넣는 칸이 나온다. 안에 있던 내용을 모두 지우고
+     아래를 통째로 붙여넣는다.
 
-  * 5번에서 설치 대신 "관리자 승인 요청" 화면이 뜨면 회사가 막아둔 것이다.
-    요청 사유 예시:
-      개발 작업 알림을 지정한 비공개 채널로 받기 위한 봇.
-      외부로 데이터를 보내지 않고, 초대된 채널에만 접근한다.
 """
 
+STEP1_TAIL = """\
+
+  6) Next 를 누르면 요약 화면이 나온다  →  Create
+
+  이제 앱이 만들어졌다. 아직 워크스페이스에 설치된 것은 아니다.
+  설치와 토큰은 다음 단계다.
+
+  * 봇 이름을 바꾸고 싶으면 위 YAML 대신 아래 출력을 붙여넣는다.
+
+       claude-slack-bridge manifest --name "내 비서"
+"""
+
+
+def step1() -> str:
+    """앱 생성 안내. 매니페스트를 그 자리에 끼워 넣는다.
+
+    별도 명령으로 출력하게 하면 창을 오가며 순서를 잃는다. 붙여넣을 것이
+    붙여넣으라는 문장 바로 아래 있어야 한다.
+    """
+    body = "\n".join("     " + ln for ln in read_manifest().splitlines())
+    return STEP1_HEAD + body + STEP1_TAIL
+
+
 STEP2 = """\
-━━ 2단계 · 알림을 받을 채널 만들기 (Slack 앱) ━━
+━━ 3단계 · 알림을 받을 곳 정하기 (Slack 앱) ━━
 
   1) 비공개 채널을 하나 만든다 (예: claude-알림)
   2) 그 채널에서  /invite @Claude Bridge  를 실행해 봇을 초대한다
@@ -96,7 +116,7 @@ def rename_manifest(text: str, name: str) -> str:
 
 
 TOKEN_HELP = """\
-━━ Bot User OAuth Token 받는 법 ━━
+━━ 2단계 · 설치하고 Bot User OAuth Token 받기 ━━
 
   1) https://api.slack.com/apps 에서 만든 앱을 연다
   2) 왼쪽 메뉴 'OAuth & Permissions' 를 클릭한다
@@ -146,7 +166,7 @@ def cmd_init(argv: list[str]) -> None:
     ready = input("이미 토큰과 채널 ID 가 있습니까? [y/N] ").strip().lower()
     if ready not in ("y", "yes"):
         print()
-        print(STEP1)
+        print(step1())
         print(TOKEN_HELP)
         print(STEP2)
         print("━━ 준비가 끝나면 다시 실행하세요 ━━\n")
@@ -207,7 +227,7 @@ def cmd_init(argv: list[str]) -> None:
         except slack.SlackError as e:
             _die(
                 f"채널 확인 실패.\n{e}\n\n"
-                "  → 2단계 3번처럼 채널 링크 URL 끝의 C... 문자열인지 확인하세요.\n"
+                "  → 3단계 3번처럼 채널 링크 URL 끝의 C... 문자열인지 확인하세요.\n"
                 "     비공개 채널이면 봇을 먼저 초대해야 보입니다."
             )
 
