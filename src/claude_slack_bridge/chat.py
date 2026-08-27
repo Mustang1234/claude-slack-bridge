@@ -15,6 +15,7 @@ Slack 에는 이력이 남는다. 그래서 받아 적는 쪽이 통째로 사�
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -24,7 +25,7 @@ from . import threads
 POLL_INTERVAL = 5.0       # Slack 레이트리밋은 넉넉하다. ntfy 의 25초를 따를 이유가 없다.
 WARN_LEAD = 10 * 60       # 마감 10분 전 예고
 AUTO_EXTEND_HOURS = 2.0   # 예고 창에 답이 오면 자리에 있다는 뜻이므로 자동 연장
-DEFAULT_HOURS = 4.0
+DEFAULT_HOURS = 10.0    # 하루 일과를 덮는 길이. 짧으면 자꾸 끊겨 되레 성가시다.
 
 CLOSE_MARK = "🔒 *종료된 스레드*"
 
@@ -64,6 +65,56 @@ def fmt_remaining(seconds: float) -> str:
         return f"{m // 60}시간 {m % 60}분"
     # "0분 뒤 닫습니다" 는 말이 안 된다. 1분 미만은 그렇게 읽히게 쓴다.
     return f"{m}분" if m else "곧"
+
+
+def parse_command(text: str):
+    """폰에서 보낸 한 줄이 마감 조작 명령인지 본다.
+
+    자리를 비운 사람이 마감을 바꾸려고 터미널로 돌아와야 한다면 그건 바꿀 수
+    없는 것이나 마찬가지다. 스레드에 한 줄 적는 것으로 되어야 한다.
+
+    명령만 적힌 줄일 때만 명령으로 친다. "연장해줘 그리고 이것도 봐줘" 처럼
+    말이 섞이면 그건 나에게 하는 말이므로 그대로 전달한다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    if t in ("닫기", "종료", "닫아", "그만"):
+        return ("close", None)
+
+    m = re.fullmatch(r"마감\s*(\d{1,2}):(\d{2})", t)
+    if m:
+        return ("until", (int(m.group(1)), int(m.group(2))))
+
+    m = re.fullmatch(r"(?:연장\s*)?(\d+(?:\.\d+)?)\s*시간(?:\s*연장)?", t)
+    if m:
+        return ("extend", float(m.group(1)))
+
+    if t in ("연장", "연장해", "연장해줘"):
+        return ("extend", AUTO_EXTEND_HOURS)
+
+    m = re.fullmatch(r"(?:연장\s*)?(\d+)\s*분(?:\s*연장)?", t)
+    if m:
+        return ("extend", int(m.group(1)) / 60)
+
+    return None
+
+
+def deadline_from_hhmm(hour: int, minute: int, now: float | None = None) -> float:
+    """오늘 그 시각. 이미 지났으면 내일 그 시각.
+
+    시각만 주고 자정을 넘기면 "이미 지난 시각" 이 되어 즉시 마감돼 버린다.
+    ntfy 때 실제로 그렇게 조용히 끊긴 적이 있다.
+    """
+    now = now or time.time()
+    lt = time.localtime(now)
+    target = time.mktime((
+        lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1
+    ))
+    if target <= now:
+        target += 86400
+    return target
 
 
 def header_text(label: str, deadline: float) -> str:
