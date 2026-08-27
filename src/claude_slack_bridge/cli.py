@@ -95,6 +95,35 @@ def rename_manifest(text: str, name: str) -> str:
     return "\n".join(out)
 
 
+TOKEN_HELP = """\
+━━ Bot User OAuth Token 받는 법 ━━
+
+  1) https://api.slack.com/apps 에서 만든 앱을 연다
+  2) 왼쪽 메뉴 'OAuth & Permissions' 를 클릭한다
+  3) 페이지 맨 위 'OAuth Tokens for Your Workspace' 를 본다
+
+     아직 토큰이 하나도 없다면 아직 설치 전이다.
+       → 'Install to Workspace' 버튼을 누르고 권한 화면에서 Allow
+       → 관리자 승인이 필요한 워크스페이스면 '요청됨' 에서 멈춘다.
+          승인이 나기 전에는 토큰이 생기지 않는다.
+
+  4) 설치가 끝나면 그 자리에 토큰이 나온다
+
+       Bot User OAuth Token    xoxb-...   ←  이것을 복사한다
+       User OAuth Token        xoxp-...   ←  이것이 아니다
+
+     둘 다 있으면 위쪽이다. 아래쪽은 내 계정 자격이라 봇으로 동작하지 않는다.
+
+  5) 토큰 오른쪽 'Copy' 를 눌러 그대로 붙여넣는다.
+
+  * 'Bot User OAuth Token' 줄이 아예 없다면 앱에 봇 사용자가 없는 것이다.
+    매니페스트로 만들지 않으면 그렇게 된다. 아래를 붙여넣어 앱을 다시 만드는
+    편이 빠르다.
+
+       claude-slack-bridge manifest
+"""
+
+
 def cmd_manifest(argv: list[str]) -> None:
     text = read_manifest()
     if "--name" in argv:
@@ -118,6 +147,7 @@ def cmd_init(argv: list[str]) -> None:
     if ready not in ("y", "yes"):
         print()
         print(STEP1)
+        print(TOKEN_HELP)
         print(STEP2)
         print("━━ 준비가 끝나면 다시 실행하세요 ━━\n")
         print("  claude-slack-bridge init\n")
@@ -131,36 +161,21 @@ def cmd_init(argv: list[str]) -> None:
     # 토큰 종류를 접두사로 먼저 가른다. 종류가 틀리면 auth.test 는 통과하고
     # 정작 메시지를 보낼 때 권한 오류가 나서, 원인이 한참 뒤에 드러난다.
     if token.startswith("xoxp-"):
-        _die(
-            "이건 사용자 토큰(User OAuth Token)입니다. 봇 토큰이 필요합니다.\n\n"
-            "  → OAuth & Permissions 페이지의 'OAuth Tokens for Your Workspace' 에서\n"
-            "     'User OAuth Token' 이 아니라 'Bot User OAuth Token' 을 복사하세요.\n"
-            "     xoxb- 로 시작합니다."
-        )
+        _die("이건 사용자 토큰(User OAuth Token)입니다. 봇 토큰이 필요합니다.\n\n" + TOKEN_HELP)
     if token.startswith("xapp-"):
-        _die(
-            "이건 앱 레벨 토큰(App-Level Token)입니다. 이 도구는 쓰지 않습니다.\n\n"
-            "  → OAuth & Permissions 의 'Bot User OAuth Token'(xoxb-)을 복사하세요."
-        )
-    if not token.startswith("xoxb-"):
-        print("  경고: xoxb- 로 시작하지 않습니다. 봇 토큰이 맞는지 확인하세요.\n")
+        _die("이건 앱 레벨 토큰(App-Level Token)입니다. 이 도구는 쓰지 않습니다.\n\n" + TOKEN_HELP)
 
     try:
         who = slack.auth_test(token)
     except slack.SlackError as e:
-        _die(f"토큰 확인 실패.\n{e}\n\n  → 1단계 6번의 Bot User OAuth Token 을 다시 확인하세요.")
+        _die(f"토큰 확인 실패.\n{e}\n\n" + TOKEN_HELP)
 
     # 접두사보다 이쪽이 확실하다. 봇 토큰이면 auth.test 응답에 bot_id 가 있고,
     # 사용자 토큰이면 없다. 접두사가 낯선 토큰도 여기서 걸린다.
     if not who.get("bot_id"):
         _die(
             f"이 토큰은 봇이 아니라 사용자({who.get('user')}) 자격입니다.\n\n"
-            "  → Slack 앱의 OAuth & Permissions 페이지에서\n"
-            "     'OAuth Tokens for Your Workspace' 항목을 보세요.\n"
-            "     위쪽 'Bot User OAuth Token' 이 필요한 것이고,\n"
-            "     아래쪽 'User OAuth Token' 은 아닙니다.\n\n"
-            "  Bot User OAuth Token 항목이 아예 없다면 앱이 워크스페이스에 설치되지\n"
-            "  않았거나 봇 사용자가 만들어지지 않은 것입니다."
+            + TOKEN_HELP
         )
 
     print(f"  워크스페이스: {who.get('team')}")
@@ -255,6 +270,7 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge init       설정 생성 — 준비가 안 됐으면 절차를 안내한다
   claude-slack-bridge manifest   Slack 콘솔에 붙여넣을 앱 매니페스트를 출력한다
                                  --name "이름" 으로 봇 이름을 바꿀 수 있다
+  claude-slack-bridge token-help  Bot User OAuth Token 받는 법을 출력한다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
 
@@ -272,6 +288,8 @@ def main() -> None:
         cmd_init(argv[1:])
     elif cmd == "manifest":
         cmd_manifest(argv[1:])
+    elif cmd == "token-help":
+        print(TOKEN_HELP)
     elif cmd == "doctor":
         cmd_doctor(argv[1:])
     elif cmd in ("-h", "--help", "help"):
