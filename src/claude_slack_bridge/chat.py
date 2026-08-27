@@ -150,6 +150,9 @@ def parse_command(text: str):
     if not t:
         return None
 
+    if t in ("핑", "ping", "살아있어?", "살아있니?", "?"):
+        return ("ping", None)
+
     if t in ("닫기", "종료", "닫아", "그만"):
         return ("close", None)
 

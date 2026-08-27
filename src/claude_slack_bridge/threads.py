@@ -91,6 +91,24 @@ def sweep(max_age_days: int = 7) -> int:
     return removed
 
 
+def _proc_is(pid, needle: str) -> bool:
+    if not pid:
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "claude-slack-bridge" in out and needle in out
+
+
+def keeper_alive(thread_ts: str) -> bool:
+    """이 스레드를 지키는 지킴이가 돌고 있는지."""
+    return _proc_is((load(thread_ts) or {}).get("keeper_pid"), "keeper")
+
+
 def watcher_alive(thread_ts: str) -> bool:
     """이 스레드를 지키는 감시자가 실제로 돌고 있는지.
 

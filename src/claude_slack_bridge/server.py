@@ -28,11 +28,16 @@ INSTRUCTIONS = """\
 세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
 그 라벨이 어느 작업인지 가릴 유일한 단서다.
 
-대화를 열었으면 **반드시 감시자를 백그라운드로 띄운다** — 툴이 돌려주는
-`watch --thread ...` 명령을 백그라운드 실행한다. 이 툴들은 내가 부를 때만 도는
-pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을 알아채지 못한다.
-감시자가 끝나면(답장 도착 또는 마감) 그 결과를 확인하고, 답장이었다면 답한 뒤
-**감시자를 다시 띄운다.** 감시자가 도는 동안에는 맥이 잠들지 않는다.
+대화를 열었으면 **프로세스 둘을 띄운다.** 툴이 돌려주는 명령을 그대로 쓴다.
+
+  - `keeper-start` — 지킴이를 떼어내 띄운다. 마감·연장·"핑" 을 지킨다. 사용자가
+    Esc 를 눌러도 죽지 않으므로, 그동안에도 폰에서 보낸 말에 반응이 있다.
+  - `watch` — 백그라운드로 띄운다. 나를 깨우는 것만 한다. 답장이 오면 종료하며,
+    그때 결과를 확인하고 답한 뒤 **다시 띄운다.**
+
+이 툴들은 내가 부를 때만 도는 pull 이라, 감시자가 없으면 다른 작업을 하는 동안
+온 답장을 알아채지 못한다. 감시자가 죽어 있어도 메시지를 잃지는 않는다 — 다음
+감시자가 커서를 이어받아 집어온다. 잃는 것은 즉시성뿐이다.
 
 세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
 아니라 `slack_chat_attach` 를 쓴다. 새로 열면 폰에 같은 작업의 스레드가 쌓인다.
@@ -51,7 +56,7 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.15.0",
+    version="0.16.2",
     instructions=INSTRUCTIONS,
 )
 
@@ -198,8 +203,9 @@ def slack_chat_open(
     return (
         f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "작업 중에도 답장을 즉시 받으려면 감시자를 백그라운드로 띄운다:\n"
-        f"  claude-slack-bridge watch --thread {c.thread_ts}"
+        "다음 둘을 띄운다:\n"
+        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}   (떼어냄 — Esc 에 안 죽음)\n"
+        f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)"
     )
 
 
@@ -277,7 +283,8 @@ def slack_chat_attach(
     return (
         f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "감시자를 백그라운드로 띄우세요:\n"
+        "다음 둘을 띄우세요:\n"
+        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}"
     )
 

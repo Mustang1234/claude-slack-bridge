@@ -300,6 +300,24 @@ def _keep_awake() -> "subprocess.Popen | None":
 def _apply_command(token, channel, thread, label, kind, value, state) -> bool:
     """폰에서 온 마감 조작 명령을 처리한다. 닫혔으면 True."""
     now = time.time()
+    if kind == "ping":
+        # 감시자가 살아있는지 사용자가 직접 확인하는 길.
+        #
+        # 감시자가 죽어 있으면 이 줄에 아무 응답이 없다 — 그 침묵이 곧 답이다.
+        # 죽은 감시자는 "나 죽었다" 고 말할 수 없으므로, 확인은 살아있는 쪽이
+        # 대답하는 형태여야 한다.
+        until = time.strftime("%H:%M", time.localtime(float(state.get("deadline") or now)))
+        try:
+            slack.post_message(
+                token, channel,
+                f"_살아 있습니다. 마감 {until} "
+                f"({chat.fmt_remaining(float(state.get('deadline') or now) - now)} 남음)._",
+                thread_ts=thread,
+            )
+        except slack.SlackError:
+            pass
+        return False
+
     if kind == "close":
         chat.close_thread(token, channel, thread, label, "폰에서 닫음")
         return True
@@ -491,6 +509,167 @@ def cmd_watch(argv: list[str]) -> None:
             threads.patch(thread, watcher_pid=None)
 
 
+def cmd_keeper(argv: list[str]) -> None:
+    """스레드를 지킨다 — 깨우지는 않는다.
+
+    감시자(watch)는 harness 가 들고 있어서 사용자가 Esc 를 누르면 같이 죽는다.
+    그런데 떼어내면(setsid) 이번엔 종료가 깨움 신호로 쓰이지 못한다. 한 프로세스가
+    둘을 겸할 수 없어서 역할을 나눈다.
+
+    지킴이는 깨우지 않으므로 떼어내도 잃을 것이 없다. Esc 를 눌러도 살아남아
+    마감을 지키고, 사용자가 적은 "연장 3시간"·"핑" 에 답하고, 새 메시지에
+    "받았습니다" 를 남긴다. 세션이 죽으면 부모를 잃은 것을 보고 스스로 끝낸다.
+
+    커서는 감시자와 따로 쓴다. 같은 값을 두 프로세스가 밀면 한쪽이 본 것을
+    다른 쪽이 못 본 것으로 만든다.
+    """
+    thread = _arg(argv, "--thread")
+    if not thread:
+        _die("--thread <스레드 ts> 가 필요합니다.")
+    interval = float(_arg(argv, "--interval") or 5)
+    parent = _arg(argv, "--parent-pid")
+
+    conf = cfg.load()
+    if conf is None:
+        _die("설정이 없습니다.")
+    state = threads.load(thread)
+    if not state:
+        _die(f"이 스레드의 기록이 없습니다: {thread}")
+    if state.get("closed"):
+        _die("이미 닫힌 스레드입니다.")
+
+    channel = state["channel"]
+    label = state.get("label") or "Claude 세션"
+    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+    require_mention = bool(state.get("require_mention"))
+    owner_id = state.get("owner_id") or conf.owner_id
+    awake = _keep_awake()
+    threads.patch(thread, keeper_pid=os.getpid())
+
+    seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
+    try:
+        while True:
+            if parent and not _pid_alive(int(parent)):
+                print("PARENT_GONE")
+                return
+
+            state = threads.load(thread) or state
+            if state.get("closed"):
+                print("CLOSED")
+                return
+            deadline = float(state.get("deadline") or 0)
+            remaining = deadline - time.time()
+
+            if remaining <= 0:
+                chat.close_thread(conf.bot_token, channel, thread, label, "마감 시각 도달")
+                print("DEADLINE_CLOSED")
+                return
+
+            if not state.get("warned") and remaining <= chat.WARN_LEAD:
+                try:
+                    slack.post_message(
+                        conf.bot_token, channel, chat.warn_text(remaining), thread_ts=thread
+                    )
+                    threads.patch(thread, warned=True)
+                except slack.SlackError:
+                    pass
+
+            try:
+                msgs = slack.conversations_replies(conf.bot_token, channel, thread)
+            except slack.SlackError:
+                time.sleep(interval)
+                continue
+
+            fresh = [
+                m for m in msgs
+                if float(m.get("ts", 0)) > seen
+                and chat.is_for_me(m, bot_user_id, owner_id, require_mention)
+            ]
+            fresh.sort(key=lambda m: float(m.get("ts", 0)))
+
+            for m in fresh:
+                seen = float(m.get("ts", 0))
+                threads.patch(thread, keeper_seen_ts=seen)
+                cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
+                if cmd:
+                    if _apply_command(
+                        conf.bot_token, channel, thread, label,
+                        cmd[0], cmd[1], threads.load(thread) or state,
+                    ):
+                        print("CLOSED_BY_USER")
+                        return
+                    continue
+
+                # 감시자가 살아 있으면 그쪽이 수신확인을 남긴다. 둘 다 남기면
+                # 같은 말이 두 번 찍힌다.
+                if not threads.watcher_alive(thread):
+                    try:
+                        slack.post_message(
+                            conf.bot_token, channel,
+                            "_받았습니다. 세션이 지금 듣고 있지 않아 답이 늦어질 수 있습니다._",
+                            thread_ts=thread,
+                        )
+                    except slack.SlackError:
+                        pass
+
+            time.sleep(interval)
+    finally:
+        if awake and awake.poll() is None:
+            awake.terminate()
+        st = threads.load(thread) or {}
+        if st.get("keeper_pid") == os.getpid():
+            threads.patch(thread, keeper_pid=None)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    return True
+
+
+def cmd_keeper_start(argv: list[str]) -> None:
+    """지킴이를 떼어내서 띄운다.
+
+    macOS 에는 setsid 가 없다. 파이썬의 start_new_session 으로 새 세션을 만들어
+    떼어낸다 — 셸이나 harness 가 프로세스 그룹째 정리해도 살아남는다.
+
+    부모 pid 를 넘겨서, 세션이 죽으면 지킴이도 스스로 끝나게 한다. 안 그러면
+    아무도 안 읽는 스레드를 영원히 지키는 프로세스가 남는다.
+    """
+    thread = _arg(argv, "--thread")
+    if not thread:
+        _die("--thread <스레드 ts> 가 필요합니다.")
+
+    if threads.keeper_alive(thread):
+        print(f"ALREADY_KEEPING\t{(threads.load(thread) or {}).get('keeper_pid')}")
+        return
+
+    cmd = [sys.argv[0], "keeper", "--thread", thread]
+    for flag in ("--interval", "--parent-pid"):
+        val = _arg(argv, flag)
+        if val:
+            cmd += [flag, val]
+    # 부모를 자동으로 잡지 않는다. keeper-start 를 감싼 셸·uvx 는 곧바로
+    # 사라지므로 그것을 부모로 삼으면 지킴이가 즉시 PARENT_GONE 으로 끝난다.
+    # 세션 pid 를 아는 호출자만 --parent-pid 로 명시한다. 없으면 마감까지 산다 —
+    # 마감이 있으므로 영원히 남지는 않는다.
+
+    log = threads.THREADS_DIR / f"{thread}.keeper.log"
+    threads.THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as fh:
+        proc = subprocess.Popen(
+            cmd, stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    # 기동 직후 죽는 경우(설정 없음 등)를 바로 드러낸다.
+    time.sleep(1.5)
+    if proc.poll() is not None:
+        _die(f"지킴이가 바로 종료됐습니다. 로그: {log}")
+    print(f"KEEPING\t{proc.pid}")
+
+
 def cmd_targets(argv: list[str]) -> None:
     """보낼 수 있는 곳을 보여준다.
 
@@ -547,6 +726,9 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge watch --thread <ts>
                                  답글이 오면 종료한다. 백그라운드로 띄우면
                                  그 종료가 곧 깨움 신호가 된다
+  claude-slack-bridge keeper-start --thread <ts>
+                                 지킴이를 떼어내 띄운다. 마감·연장·핑을 지키며
+                                 Esc 에 죽지 않는다 (깨우지는 않는다)
   claude-slack-bridge targets    보낼 수 있는 곳(기본 DM · 초대된 채널)을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
@@ -571,6 +753,10 @@ def main() -> None:
         cmd_watch(argv[1:])
     elif cmd == "targets":
         cmd_targets(argv[1:])
+    elif cmd == "keeper":
+        cmd_keeper(argv[1:])
+    elif cmd == "keeper-start":
+        cmd_keeper_start(argv[1:])
     elif cmd == "doctor":
         cmd_doctor(argv[1:])
     elif cmd in ("-h", "--help", "help"):
