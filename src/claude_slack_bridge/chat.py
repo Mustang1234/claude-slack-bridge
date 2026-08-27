@@ -197,6 +197,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
     """
     chat = current()
     until = time.time() + timeout
+    fails = 0
 
     # 첫 폴링 전에 밀린 것부터 본다. 대기에 들어가기 직전 도착한 답장을
     # timeout 만큼 묵히지 않기 위해서다.
@@ -221,9 +222,17 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
 
         try:
             fresh = [m for m in poll_new(token, chat) if is_human(m, bot_user_id)]
+            fails = 0
         except slack.SlackError:
             # 한 번의 네트워크 실패로 대화를 끝내지 않는다. 커서를 그대로 두고
             # 다음 주기에 다시 긁으므로 유실이 아니라 지연이 된다.
+            #
+            # 다만 계속 실패하면 조용히 삼키지 않는다. 그러면 "답장 없음" 과
+            # 구분이 안 되어, 사용자는 답을 보냈는데 기다리는 쪽은 아무 일도
+            # 없다고 믿는 상태가 된다. 실제로 그렇게 새고 있었다.
+            fails += 1
+            if fails >= 3:
+                raise
             fresh = []
 
         if fresh:

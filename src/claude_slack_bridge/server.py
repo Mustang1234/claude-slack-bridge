@@ -32,7 +32,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.10.0",
+    version="0.10.1",
     instructions=INSTRUCTIONS,
 )
 

@@ -74,14 +74,27 @@ def scrub_check(text: str) -> None:
             raise BodyRejected(f"본문에 {label} 로 보이는 값이 있어 보내지 않았습니다.")
 
 
-def api(token: str, method: str, payload: dict) -> dict:
-    body = json.dumps(payload).encode("utf-8")
+def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
+    """Slack Web API 호출.
+
+    인코딩을 골라야 하는 이유가 있다. Slack 의 읽기 계열 메서드 일부는 JSON
+    본문을 받지 않고 `invalid_arguments` 로 떨어진다 — 파라미터가 맞는데도
+    그렇다. 실측: conversations.replies 는 JSON 으로 부르면 실패하고 form 으로
+    부르면 성공한다. 그래서 읽기 계열은 form 으로 보낸다.
+    """
+    if form:
+        body = urllib.parse.urlencode(payload).encode("utf-8")
+        content_type = "application/x-www-form-urlencoded; charset=utf-8"
+    else:
+        body = json.dumps(payload).encode("utf-8")
+        content_type = "application/json; charset=utf-8"
+
     req = urllib.request.Request(
         API_BASE + method,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
+            "Content-Type": content_type,
         },
         method="POST",
     )
@@ -113,22 +126,24 @@ def post_message(token: str, channel: str, text: str, thread_ts: str | None = No
 
 
 def conversations_info(token: str, channel: str) -> dict:
-    return api(token, "conversations.info", {"channel": channel})
+    return api(token, "conversations.info", {"channel": channel}, form=True)
 
 
 def probe(token: str, channel: str) -> dict:
     """보낼 곳에 실제로 접근되는지 확인한다.
 
-    DM 에는 conversations.info 를 쓰지 않는다. IM 에 대해서는 im:read 를 요구해
-    invalid_arguments 로 떨어지는데, 그 스코프를 넣으면 이미 설치한 사람이 앱을
-    다시 설치해야 한다. 대신 읽기를 한 번 해보는 것으로 접근 가능 여부를 대신한다
-    (im:history 는 어차피 답장을 받으려고 이미 갖고 있다).
+    DM 에는 conversations.info 를 쓰지 않는다. IM 에 대해서는 im:read 를 요구하고
+    (실측: missing_scope, needed=im:read), 그 스코프를 넣으면 이미 설치한 사람이
+    앱을 다시 설치해야 한다. 대신 읽기를 한 번 해보는 것으로 접근 가능 여부를
+    대신한다 — im:history 는 어차피 답장을 받으려고 이미 갖고 있다.
     """
     if channel.startswith("D"):
         conversations_history(token, channel, oldest="0")
         return {"kind": "dm", "label": "봇과의 DM", "ready": True}
 
-    info = api(token, "conversations.info", {"channel": channel}).get("channel", {})
+    info = api(
+        token, "conversations.info", {"channel": channel}, form=True
+    ).get("channel", {})
     name = info.get("name", "?")
     return {
         "kind": "channel",
@@ -145,7 +160,7 @@ def conversations_open(token: str, user_id: str) -> str:
     DM 은 채널 멤버십이 아니라서 초대라는 절차 자체가 없다. 권한이 막힌 회사
     워크스페이스에서 유일하게 남는 길이다.
     """
-    return api(token, "conversations.open", {"users": user_id})["channel"]["id"]
+    return api(token, "conversations.open", {"users": user_id}, form=True)["channel"]["id"]
 
 
 def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
@@ -155,7 +170,7 @@ def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
     폰에서 보낸 말을 영영 못 본다.
     """
     payload = {"channel": channel, "limit": 100, "oldest": oldest}
-    return api(token, "conversations.history", payload).get("messages", [])
+    return api(token, "conversations.history", payload, form=True).get("messages", [])
 
 
 def conversations_replies(
@@ -164,4 +179,4 @@ def conversations_replies(
     payload: dict = {"channel": channel, "ts": thread_ts, "limit": 100}
     if oldest:
         payload["oldest"] = oldest
-    return api(token, "conversations.replies", payload).get("messages", [])
+    return api(token, "conversations.replies", payload, form=True).get("messages", [])
