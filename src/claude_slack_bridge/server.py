@@ -26,7 +26,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.6.0",
+    version="0.7.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -58,7 +58,7 @@ def slack_notify(text: str, title: str | None = None) -> str:
     body = f"*{title}*\n{text}" if title else text
     # 대화가 열려 있으면 그 스레드로 보낸다. 알림과 답장이 한 자리에 모여야
     # 폰에서 맥락이 끊기지 않는다.
-    thread = chatmod._chat.thread_ts if chatmod._chat else None
+    thread = chatmod._chat.reply_thread if chatmod._chat else None
     try:
         res = slack.post_message(conf.bot_token, conf.channel, body, thread_ts=thread)
     except slack.BodyRejected as e:

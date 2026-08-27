@@ -14,6 +14,12 @@ features:
   bot_user:
     display_name: Claude Bridge
     always_online: false
+  app_home:
+    # 이게 없으면 봇과의 DM 하단에 "이 앱으로 메시지를 보내는 기능이 꺼져
+    # 있습니다" 가 뜬다. 알림은 오는데 답장은 못 하는 반쪽이 되므로 켜 둔다.
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 
 oauth_config:
   scopes:

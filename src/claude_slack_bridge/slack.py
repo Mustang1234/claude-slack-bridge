@@ -126,6 +126,16 @@ def conversations_open(token: str, user_id: str) -> str:
     return api(token, "conversations.open", {"users": user_id})["channel"]["id"]
 
 
+def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
+    """대화의 최근 메시지를 읽는다.
+
+    DM 에서는 사람이 스레드가 아니라 그냥 아래에 이어 쓴다. 스레드 답글만 보면
+    폰에서 보낸 말을 영영 못 본다.
+    """
+    payload = {"channel": channel, "limit": 100, "oldest": oldest}
+    return api(token, "conversations.history", payload).get("messages", [])
+
+
 def conversations_replies(
     token: str, channel: str, thread_ts: str, oldest: str | None = None
 ) -> list[dict]:

@@ -27,14 +27,26 @@ DEFAULT_HOURS = 4.0
 @dataclass
 class Chat:
     channel: str
-    thread_ts: str
+    thread_ts: str          # DM 에서는 비어 있다 (아래 is_im 주석 참고)
     deadline: float
+    is_im: bool = False
+    anchor_ts: str = ""     # 이 시각 이후의 메시지만 읽는다
     warned: bool = False
     seen: set[str] = field(default_factory=set)
 
     @property
     def remaining(self) -> float:
         return self.deadline - time.time()
+
+    @property
+    def reply_thread(self) -> str | None:
+        """보낼 때 붙일 thread_ts.
+
+        채널에서는 스레드로 묶어야 다른 세션과 섞이지 않는다. DM 은 상대가
+        나 하나뿐이라 섞일 일이 없고, 오히려 스레드로 묶으면 폰에서 답장하려면
+        스레드를 열어야 해서 번거로워진다.
+        """
+        return self.thread_ts or None
 
 
 # 이 프로세스 = 이 Claude 세션. 그래서 전역 하나로 충분하다.
@@ -57,18 +69,21 @@ def fmt_remaining(seconds: float) -> str:
 
 
 def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat:
-    """스레드를 하나 열고 그 스레드를 이 세션에 묶는다."""
+    """대화를 열어 이 세션에 묶는다.
+
+    채널이면 스레드를 파고, DM 이면 그냥 대화 자체를 쓴다.
+    """
     global _chat
+    is_im = channel.startswith("D")
     head = label or "Claude 세션"
-    res = slack.post_message(
-        token,
-        channel,
-        f"*{head}* — 대화를 엽니다.\n이 스레드에 답글을 달면 세션이 이어받습니다.",
-    )
+    guide = "여기에 답장하면 세션이 이어받습니다." if is_im else "이 스레드에 답글을 달면 세션이 이어받습니다."
+    res = slack.post_message(token, channel, f"*{head}* — 대화를 엽니다.\n{guide}")
     _chat = Chat(
         channel=channel,
-        thread_ts=res["ts"],
+        thread_ts="" if is_im else res["ts"],
         deadline=time.time() + hours * 3600,
+        is_im=is_im,
+        anchor_ts=res["ts"],
     )
     return _chat
 
@@ -78,7 +93,7 @@ def close_chat(token: str, reason: str = "대화를 닫습니다.") -> None:
     if _chat is None:
         return
     try:
-        slack.post_message(token, _chat.channel, reason, thread_ts=_chat.thread_ts)
+        slack.post_message(token, _chat.channel, reason, thread_ts=_chat.reply_thread)
     except slack.SlackError:
         # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
         # 있는 쪽이 나쁘다.
@@ -124,15 +139,21 @@ def describe(msg: dict) -> str:
 
 
 def poll_new(token: str, chat: Chat) -> list[dict]:
-    """스레드에서 아직 못 본 사람 메시지를 가져온다."""
-    msgs = slack.conversations_replies(token, chat.channel, chat.thread_ts)
+    """아직 못 본 메시지를 가져온다."""
+    if chat.is_im:
+        msgs = slack.conversations_history(token, chat.channel, oldest=chat.anchor_ts)
+    else:
+        msgs = slack.conversations_replies(token, chat.channel, chat.thread_ts)
+
     fresh = []
     for m in msgs:
         ts = m.get("ts", "")
-        if ts in chat.seen or ts == chat.thread_ts:
+        if not ts or ts in chat.seen or ts == chat.anchor_ts:
             continue
         chat.seen.add(ts)
         fresh.append(m)
+    # history 는 최신순으로 준다. 사람이 보낸 순서대로 읽어야 맥락이 맞는다.
+    fresh.sort(key=lambda m: float(m.get("ts", "0")))
     return fresh
 
 
@@ -162,7 +183,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
                     token,
                     chat.channel,
                     f"{fmt_remaining(chat.remaining)} 뒤 닫힙니다. 답글을 주시면 연장됩니다.",
-                    thread_ts=chat.thread_ts,
+                    thread_ts=chat.reply_thread,
                 )
             except slack.SlackError:
                 pass
