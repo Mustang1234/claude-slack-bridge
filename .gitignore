@@ -31,3 +31,6 @@ node_modules/
 
 # macOS
 .DS_Store
+
+# uv 잠금파일 — 이 패키지는 uvx 로 설치되므로 소비자 쪽에서 쓰이지 않는다
+uv.lock

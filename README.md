@@ -40,7 +40,12 @@ claude mcp add claude-slack-bridge -s user -- \
 |---|---|
 | `claude-slack-bridge` | MCP 서버로 동작 (`claude mcp add` 가 이렇게 부른다) |
 | `claude-slack-bridge init` | 설정 생성 + 연결 확인 + 테스트 메시지 발송 |
+| `claude-slack-bridge manifest` | Slack 콘솔에 붙여넣을 앱 매니페스트 출력 |
 | `claude-slack-bridge doctor` | 현재 설정이 살아있는지 점검 |
+
+`init` 은 준비가 안 된 사람에게 **절차부터 안내한다.** uvx 로 설치하면 레포가 없어서
+문서 파일을 열어볼 수 없으므로, 필요한 것이 전부 터미널 안에서 끝나야 한다.
+매니페스트도 패키지 안에 들어 있어 `manifest` 명령으로 꺼내 쓴다.
 
 `init` 은 설정 파일만 만들고 끝내지 않는다. 토큰이 살아있는지, **봇이 채널에 실제로
 초대돼 있는지**까지 확인하고 테스트 메시지를 보낸다. 초대를 빠뜨리는 것이 압도적인
@@ -50,8 +55,18 @@ claude mcp add claude-slack-bridge -s user -- \
 
 | 툴 | 하는 일 |
 |---|---|
-| `slack_notify` | 채널로 한 줄 알림을 보낸다 |
+| `slack_notify` | 한 줄 알림을 보낸다. 대화가 열려 있으면 그 스레드로 간다 |
 | `slack_check` | 토큰·채널·봇 초대 상태를 확인한다 |
+| `slack_chat_open` | 스레드를 열어 이 세션에 묶는다 (기본 4시간) |
+| `slack_wait_reply` | 답글이 올 때까지 기다렸다 돌려준다 |
+| `slack_chat_extend` | 마감을 미룬다 |
+| `slack_chat_close` | 스레드를 닫는다 |
+
+`slack_wait_reply` 가 그냥 **블로킹**한다는 점이 구조를 단순하게 만든다. 채널을
+붙드는 프로세스와 세션을 깨우는 프로세스를 따로 둘 필요가 없고, 중간 파일도 없다.
+
+마감 10분 전에 스레드로 예고하고, 그 창 안에 답글이 오면 자리에 있다는 뜻이므로
+2시간 자동 연장한다. 조용하다는 이유만으로는 닫지 않는다.
 
 ## 설정
 
@@ -74,4 +89,5 @@ claude mcp add claude-slack-bridge -s user -- \
 
 ## 상태
 
-알림 발신은 동작한다. 폰에서 답장을 받아 세션이 이어받는 양방향 대화는 작업 중이다.
+알림 발신과 양방향 대화 모두 구현됐다. 실제 Slack 워크스페이스에 붙여 폰까지
+도달하는지는 아직 확인 전이다.
