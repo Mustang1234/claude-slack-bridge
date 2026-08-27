@@ -1,6 +1,6 @@
 [project]
 name = "claude-slack-bridge"
-version = "0.16.3"
+version = "0.17.0"
 description = "Claude Code 세션과 Slack 을 잇는 MCP 서버 — 자리를 비운 사이 알림을 받고 폰에서 답장한다"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -25,6 +25,10 @@ from . import threads
 
 MANIFEST_NAME = "slack-app-manifest.yaml"
 
+# 받자마자 알리지 않고 이만큼 기다린다. 그 사이 진짜 답이 붙으면 알리지 않는다 —
+# 매번 붙는 "받았습니다" 는 정보가 아니라 소음이다.
+ACK_DELAY = 10.0
+
 
 def _die(msg: str) -> None:
     print(msg, file=sys.stderr)
@@ -479,21 +483,10 @@ def cmd_watch(argv: list[str]) -> None:
                 wake.append(m)
 
             if wake:
-                # 받았다는 사실만 즉시 알린다.
-                #
-                # 깨움 신호는 에이전트가 지금 돌리는 도구가 끝나야 전달된다.
-                # 긴 작업 중이면 답이 몇 분 늦을 수 있는데, 그 사이 폰에서는
-                # 씹힌 것과 구분되지 않는다. 이 한 줄이 그 불확실성을 없앤다.
-                # 모델을 거치지 않으므로 즉시 나간다.
-                if "--no-ack" not in argv:
-                    try:
-                        slack.post_message(
-                            conf.bot_token, channel,
-                            "_받았습니다. 작업 중이면 답이 조금 늦을 수 있습니다._",
-                            thread_ts=thread,
-                        )
-                    except slack.SlackError:
-                        pass
+                # 수신확인은 여기서 하지 않는다. 감시자는 곧바로 종료해 세션을
+                # 깨워야 하므로 "답이 붙는지" 를 지켜볼 수 없고, 무조건 보내면
+                # 대부분의 경우 바로 뒤에 진짜 답이 붙어 같은 말이 두 번 된다.
+                # 그건 지킴이가 10초 세어 보고 판단한다.
                 for m in wake:
                     first = chat.describe(m).replace("\n", " ")[:120]
                     print(f"MESSAGE\t{m.get('ts')}\t{first}")
@@ -547,6 +540,7 @@ def cmd_keeper(argv: list[str]) -> None:
     threads.patch(thread, keeper_pid=os.getpid())
 
     seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
+    pending: list[float] = []   # 수신확인을 보낼지 유예 중인 메시지들
     try:
         while True:
             if parent and not _pid_alive(int(parent)):
@@ -602,17 +596,31 @@ def cmd_keeper(argv: list[str]) -> None:
                         return
                     continue
 
-                # 감시자가 살아 있으면 그쪽이 수신확인을 남긴다. 둘 다 남기면
-                # 같은 말이 두 번 찍힌다.
-                if not threads.watcher_alive(thread):
-                    try:
-                        slack.post_message(
-                            conf.bot_token, channel,
-                            "_받았습니다. 세션이 지금 듣고 있지 않아 답이 늦어질 수 있습니다._",
-                            thread_ts=thread,
-                        )
-                    except slack.SlackError:
-                        pass
+                # 지금 답하지 않고 적어둔다. 대부분은 몇 초 안에 진짜 답이
+                # 붙으므로, 그때 "받았습니다" 는 소음일 뿐이다.
+                pending.append(float(m.get("ts", 0)))
+
+            # 유예가 지난 것 중 아직 답이 안 붙은 것만 알린다.
+            still = []
+            for ts in pending:
+                if time.time() - ts < ACK_DELAY:
+                    still.append(ts)
+                    continue
+                answered = any(
+                    m.get("bot_id") and float(m.get("ts", 0)) > ts for m in msgs
+                )
+                if answered:
+                    continue
+                note = (
+                    "_받았습니다. 작업 중이라 답이 조금 늦어집니다._"
+                    if threads.watcher_alive(thread)
+                    else "_받았습니다. 세션이 지금 듣고 있지 않아 답이 늦어질 수 있습니다._"
+                )
+                try:
+                    slack.post_message(conf.bot_token, channel, note, thread_ts=thread)
+                except slack.SlackError:
+                    still.append(ts)   # 못 보냈으면 다음 주기에 다시 시도
+            pending = still
 
             time.sleep(interval)
     finally:
