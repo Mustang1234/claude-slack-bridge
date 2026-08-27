@@ -350,10 +350,18 @@ def cmd_watch(argv: list[str]) -> None:
     if state.get("closed"):
         _die("이미 닫힌 스레드입니다.")
 
+    # 감시자가 둘 뜨면 같은 답글로 세션을 두 번 깨우고, 커서를 서로 덮어쓴다.
+    # 실측: 같은 스레드에 둘을 띄웠더니 한 메시지로 두 번 깨어났다.
+    other = state.get("watcher_pid")
+    if other != os.getpid() and threads.watcher_alive(thread):
+        print(f"ALREADY_WATCHING\t{other}")
+        return
+
     channel = state["channel"]
     label = state.get("label") or "Claude 세션"
     bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
     awake = _keep_awake()
+    threads.patch(thread, watcher_pid=os.getpid())
 
     # 어디까지 읽었는지는 파일이 정본이다. 기록이 없을 때만(첫 감시) 지금 있는
     # 것을 기준선으로 삼는다.
@@ -442,6 +450,21 @@ def cmd_watch(argv: list[str]) -> None:
                 wake.append(m)
 
             if wake:
+                # 받았다는 사실만 즉시 알린다.
+                #
+                # 깨움 신호는 에이전트가 지금 돌리는 도구가 끝나야 전달된다.
+                # 긴 작업 중이면 답이 몇 분 늦을 수 있는데, 그 사이 폰에서는
+                # 씹힌 것과 구분되지 않는다. 이 한 줄이 그 불확실성을 없앤다.
+                # 모델을 거치지 않으므로 즉시 나간다.
+                if "--no-ack" not in argv:
+                    try:
+                        slack.post_message(
+                            conf.bot_token, channel,
+                            "_받았습니다. 작업 중이면 답이 조금 늦을 수 있습니다._",
+                            thread_ts=thread,
+                        )
+                    except slack.SlackError:
+                        pass
                 for m in wake:
                     first = chat.describe(m).replace("\n", " ")[:120]
                     print(f"MESSAGE\t{m.get('ts')}\t{first}")
@@ -451,6 +474,10 @@ def cmd_watch(argv: list[str]) -> None:
     finally:
         if awake and awake.poll() is None:
             awake.terminate()
+        # 내가 기록한 것일 때만 지운다. 남이 이미 이어받았으면 그쪽 기록이다.
+        st = threads.load(thread) or {}
+        if st.get("watcher_pid") == os.getpid():
+            threads.patch(thread, watcher_pid=None)
 
 
 def cmd_doctor(argv: list[str]) -> None:

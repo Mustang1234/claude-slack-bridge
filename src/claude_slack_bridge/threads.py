@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -88,3 +89,23 @@ def sweep(max_age_days: int = 7) -> int:
         except OSError:
             continue
     return removed
+
+
+def watcher_alive(thread_ts: str) -> bool:
+    """이 스레드를 지키는 감시자가 실제로 돌고 있는지.
+
+    pid 만 보고 판정하면 안 된다. 죽은 감시자의 pid 를 다른 프로세스가 이미
+    차지했을 수 있고, 그러면 살아있다고 오판해 감시를 영영 안 띄운다.
+    명령줄에 이 도구 이름이 있는지까지 대조한다.
+    """
+    pid = (load(thread_ts) or {}).get("watcher_pid")
+    if not pid:
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "claude-slack-bridge" in out and "watch" in out

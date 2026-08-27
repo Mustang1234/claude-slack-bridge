@@ -16,6 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from . import chat as chatmod
 from . import config as cfg
 from . import slack
+from . import threads
 
 INSTRUCTIONS = """\
 자리를 비운 사용자의 폰(Slack)으로 알림을 보내는 다리다.
@@ -42,7 +43,7 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.12.0",
+    version="0.13.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -74,14 +75,27 @@ def slack_notify(text: str, title: str | None = None) -> str:
     body = f"*{title}*\n{text}" if title else text
     # 대화가 열려 있으면 그 스레드로 보낸다. 알림과 답장이 한 자리에 모여야
     # 폰에서 맥락이 끊기지 않는다.
-    thread = chatmod._chat.reply_thread if chatmod._chat else None
+    thread = chatmod._chat.thread_ts if chatmod._chat else None
+
+    # 감시자가 없으면 답장이 바로 읽히지 않는다. 그 사실을 **폰에서** 알아야
+    # 한다 — 답을 적어놓고 읽히는 줄 아는 것이 제일 나쁘다.
+    unwatched = bool(thread) and not threads.watcher_alive(thread)
+    if unwatched:
+        body += "\n\n_지금은 감시 중이 아닙니다. 여기 답글을 달아도 바로 읽히지 않습니다._"
     try:
         res = slack.post_message(conf.bot_token, conf.channel, body, thread_ts=thread)
     except slack.BodyRejected as e:
         return f"보내지 않았습니다 — {e}"
     except slack.SlackError as e:
         return f"보내지 못했습니다.\n{e}"
-    return f"보냈습니다 (ts={res.get('ts', '?')})"
+    sent = f"보냈습니다 (ts={res.get('ts', '?')})"
+    if unwatched:
+        sent += (
+            "\n경고: 이 스레드를 지키는 감시자가 없습니다. 사용자가 답글을 달아도"
+            " 알아채지 못합니다.\n  → claude-slack-bridge watch --thread "
+            f"{thread} 를 백그라운드로 띄우세요."
+        )
+    return sent
 
 
 @server.tool(
