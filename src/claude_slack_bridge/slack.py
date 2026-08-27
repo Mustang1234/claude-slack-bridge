@@ -116,6 +116,16 @@ def conversations_info(token: str, channel: str) -> dict:
     return api(token, "conversations.info", {"channel": channel})
 
 
+def conversations_open(token: str, user_id: str) -> str:
+    """봇과 사용자의 1:1 DM 을 열고 그 대화 ID(`D...`)를 돌려준다.
+
+    채널은 워크스페이스가 앱 추가 권한을 관리자로 제한하면 봇을 초대할 수 없다.
+    DM 은 채널 멤버십이 아니라서 초대라는 절차 자체가 없다. 권한이 막힌 회사
+    워크스페이스에서 유일하게 남는 길이다.
+    """
+    return api(token, "conversations.open", {"users": user_id})["channel"]["id"]
+
+
 def conversations_replies(
     token: str, channel: str, thread_ts: str, oldest: str | None = None
 ) -> list[dict]:
