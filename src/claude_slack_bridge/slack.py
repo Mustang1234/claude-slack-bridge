@@ -105,6 +105,11 @@ def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
         raise SlackError("http_error", method, f"HTTP {e.code}") from e
     except urllib.error.URLError as e:
         raise SlackError("network_error", method, str(e.reason)) from e
+    except (TimeoutError, OSError, json.JSONDecodeError) as e:
+        # SSL 읽기 타임아웃은 URLError 로 안 싸여 그대로 튀어나온다. 이걸 안
+        # 잡으면 지연 한 번에 감시자가 통째로 죽는다 — 실측으로 그렇게 죽었다.
+        # 여기서 SlackError 로 바꿔 놓아야 위쪽의 재시도가 받아낸다.
+        raise SlackError("network_error", method, f"{type(e).__name__}: {e}") from e
 
     if not data.get("ok"):
         raise SlackError(str(data.get("error", "unknown")), method, str(data.get("needed", "")))
