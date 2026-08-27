@@ -34,6 +34,10 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 감시자가 끝나면(답장 도착 또는 마감) 그 결과를 확인하고, 답장이었다면 답한 뒤
 **감시자를 다시 띄운다.** 감시자가 도는 동안에는 맥이 잠들지 않는다.
 
+세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
+아니라 `slack_chat_attach` 를 쓴다. 새로 열면 폰에 같은 작업의 스레드가 쌓인다.
+붙을 대상은 `slack_chat_list` 로 찾는다.
+
 스레드는 기본적으로 사용자와의 DM 에 열린다. 팀이 같이 봐야 하는 일이면
 `channel="#이름"` 으로 지정한다. 채널에서는 봇을 @멘션한 소유자의 답글만 지시로
 받는다 — 옆에서 오가는 대화가 작업을 움직이면 안 되기 때문이다.
@@ -47,7 +51,7 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.14.0",
+    version="0.15.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -232,6 +236,70 @@ def slack_wait_reply(timeout_seconds: int = 600) -> str:
         return f"아직 답장이 없습니다. (마감까지 {chatmod.fmt_remaining(c.remaining)})"
     return "\n---\n".join(chatmod.describe(m) for m in msgs)
 
+
+@server.tool(
+    name="slack_chat_attach",
+    title="기존 스레드에 붙기",
+    description=(
+        "이미 있는 Slack 스레드에 이 세션을 묶는다. 세션이 재시작돼 자기가 열어둔 "
+        "스레드로 돌아갈 때, 또는 다른 세션이 연 스레드를 이어받을 때 쓴다. "
+        "머리글을 새로 올리지 않으므로 폰에 같은 작업의 스레드가 쌓이지 않는다."
+    ),
+)
+def slack_chat_attach(
+    thread_ts: str,
+    channel: str | None = None,
+    hours: float | None = None,
+    label: str | None = None,
+) -> str:
+    """기존 스레드에 붙는다.
+
+    Args:
+        thread_ts: 붙을 스레드의 ts. Slack 링크 끝의 p1787803636465309 는
+            1787803636.465309 로 읽는다(뒤에서 여섯 자리 앞에 점).
+        channel: 그 스레드가 있는 대화. 기록이 있으면 생략해도 된다.
+        hours: 마감을 다시 잡을 때만. 생략하면 기록된 마감을 잇는다.
+        label: 라벨을 바꿀 때만.
+    """
+    conf = cfg.load()
+    if conf is None:
+        return SETUP_HINT
+    try:
+        # 기록이 없는 스레드(영속화 이전에 열린 것)에도 붙을 수 있어야 한다.
+        # 그때는 설정의 기본 대화에 있다고 본다 — 대개 맞고, 틀리면 읽기가
+        # 실패하면서 바로 드러난다.
+        target = slack.resolve_target(conf.bot_token, channel or "", conf.channel)
+        c = chatmod.attach(conf.bot_token, thread_ts.strip(), target, hours, label)
+    except (chatmod.NoChat, slack.SlackError) as e:
+        return f"붙지 못했습니다.\n{e}"
+
+    where = "DM" if c.channel.startswith("D") else c.channel
+    return (
+        f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
+        f"thread={c.thread_ts}\n"
+        "감시자를 백그라운드로 띄우세요:\n"
+        f"  claude-slack-bridge watch --thread {c.thread_ts}"
+    )
+
+
+@server.tool(
+    name="slack_chat_list",
+    title="열려 있는 스레드 보기",
+    description="아직 닫히지 않은 스레드를 보여준다. 붙을 대상을 찾을 때 쓴다.",
+)
+def slack_chat_list() -> str:
+    import time as _t
+
+    rows = chatmod.open_threads()
+    if not rows:
+        return "열려 있는 스레드 기록이 없습니다."
+    out = []
+    for r in rows:
+        ts = r.get("thread_ts", "?")
+        until = _t.strftime("%H:%M", _t.localtime(float(r.get("deadline") or 0)))
+        watched = "감시중" if threads.watcher_alive(ts) else "감시없음"
+        out.append(f"{ts}  마감 {until}  {watched}  {r.get('label', '')}")
+    return "\n".join(out)
 
 @server.tool(
     name="slack_chat_extend",

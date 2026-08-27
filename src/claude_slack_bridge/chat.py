@@ -27,6 +27,76 @@ WARN_LEAD = 10 * 60       # 마감 10분 전 예고
 AUTO_EXTEND_HOURS = 2.0   # 예고 창에 답이 오면 자리에 있다는 뜻이므로 자동 연장
 DEFAULT_HOURS = 10.0    # 하루 일과를 덮는 길이. 짧으면 자꾸 끊겨 되레 성가시다.
 
+def attach(
+    token: str,
+    thread_ts: str,
+    channel: str = "",
+    hours: float | None = None,
+    label: str | None = None,
+) -> Chat:
+    """이미 있는 스레드에 이 세션을 묶는다.
+
+    스레드를 여는 것과 붙는 것은 다른 일이다. 이 구분이 없으면 두 경우가 막힌다.
+
+      - 세션이 재시작되면 자기가 열어둔 스레드로 못 돌아온다. `_chat` 은 서버
+        프로세스 메모리에 있고 서버는 세션과 함께 죽기 때문이다.
+      - 다른 사람/다른 세션이 연 스레드를 이어받을 수 없다.
+
+    둘 다 "머리글을 하나 더 올린다" 로 우회하면 폰에 같은 작업의 스레드가
+    쌓인다. 붙는 길이 따로 있어야 한다.
+
+    기록이 있으면 마감·라벨을 그대로 이어받고, 없으면(영속화 이전에 열린
+    스레드) 지금 기준으로 새로 만든다.
+    """
+    global _chat
+    state = threads.load(thread_ts) or {}
+    if state.get("closed"):
+        raise NoChat(f"이미 닫힌 스레드입니다: {thread_ts}")
+
+    channel = channel or state.get("channel") or ""
+    if not channel:
+        raise NoChat("어느 대화의 스레드인지 알 수 없습니다. channel 을 함께 주세요.")
+
+    label = label or state.get("label") or "Claude 세션"
+    if hours is not None:
+        deadline = time.time() + hours * 3600
+    elif state.get("deadline"):
+        deadline = float(state["deadline"])
+    else:
+        deadline = time.time() + DEFAULT_HOURS * 3600
+
+    _chat = Chat(
+        channel=channel,
+        thread_ts=thread_ts,
+        deadline=deadline,
+        label=label,
+        header=header_text(label, deadline),
+    )
+    threads.save(thread_ts, {
+        **state,
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "label": label,
+        "deadline": deadline,
+        "warned": bool(state.get("warned")),
+        "closed": False,
+        "require_mention": state.get("require_mention", not channel.startswith("D")),
+        "owner_id": state.get("owner_id", ""),
+    })
+    return _chat
+
+
+def open_threads() -> list[dict]:
+    """아직 닫히지 않은 스레드 기록. 붙을 대상을 찾을 때 쓴다."""
+    out = []
+    for path in sorted(threads.THREADS_DIR.glob("*.json")) if threads.THREADS_DIR.exists() else []:
+        data = threads.load(path.stem)
+        if data and not data.get("closed"):
+            out.append(data)
+    out.sort(key=lambda d: float(d.get("thread_ts") or 0))
+    return out
+
+
 CLOSE_MARK = "🔒 *종료된 스레드*"
 
 
