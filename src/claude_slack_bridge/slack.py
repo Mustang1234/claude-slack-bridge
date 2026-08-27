@@ -190,3 +190,49 @@ def conversations_replies(
     if oldest:
         payload["oldest"] = oldest
     return api(token, "conversations.replies", payload, form=True).get("messages", [])
+
+
+def my_conversations(token: str) -> list[dict]:
+    """봇이 실제로 들어가 있는 채널 목록.
+
+    conversations.list 는 워크스페이스의 모든 채널을 준다 — 봇이 못 들어간
+    곳까지 섞여 있어서, 고르고 나서야 not_in_channel 로 실패한다.
+    users.conversations 는 들어가 있는 것만 준다.
+
+    im 은 여기 넣지 않는다. 그 타입을 요청하려면 im:read 가 필요한데, 그 스코프를
+    더하면 이미 설치한 사람이 앱을 다시 설치해야 한다. DM 은 설정에 이미 있다.
+    """
+    out = api(token, "users.conversations", {
+        "types": "public_channel,private_channel",
+        "exclude_archived": True,
+        "limit": 200,
+    }, form=True)
+    return [
+        {"id": c.get("id"), "name": c.get("name", ""), "private": bool(c.get("is_private"))}
+        for c in out.get("channels", [])
+    ]
+
+
+def resolve_target(token: str, target: str, default: str) -> str:
+    """사람이 적은 목적지를 대화 ID 로 바꾼다.
+
+    받는 형태는 셋이다: 빈 값(기본값 사용) · 대화 ID(C.../D...) · #채널명.
+    이름으로 적을 수 있어야 하는 이유는, 채널 ID 를 외우고 있는 사람이 없기
+    때문이다.
+    """
+    t = (target or "").strip()
+    if not t:
+        return default
+    if t[0] in "CDG" and " " not in t and t.upper() == t:
+        return t
+
+    name = t.lstrip("#").strip()
+    for conv in my_conversations(token):
+        if conv["name"] == name:
+            return conv["id"]
+
+    known = ", ".join("#" + c["name"] for c in my_conversations(token)) or "(없음)"
+    raise SlackError(
+        "channel_not_found", "resolve_target",
+        f"'{t}' 을 찾지 못했습니다. 봇이 들어가 있는 채널: {known}",
+    )

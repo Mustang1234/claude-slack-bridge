@@ -34,6 +34,10 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 감시자가 끝나면(답장 도착 또는 마감) 그 결과를 확인하고, 답장이었다면 답한 뒤
 **감시자를 다시 띄운다.** 감시자가 도는 동안에는 맥이 잠들지 않는다.
 
+스레드는 기본적으로 사용자와의 DM 에 열린다. 팀이 같이 봐야 하는 일이면
+`channel="#이름"` 으로 지정한다. 채널에서는 봇을 @멘션한 소유자의 답글만 지시로
+받는다 — 옆에서 오가는 대화가 작업을 움직이면 안 되기 때문이다.
+
 기본 유지 시간은 10시간이다. 사용자는 스레드에 한 줄 적어 언제든 바꿀 수 있다 —
 "연장 3시간", "마감 18:00", "닫기". 그런 줄은 감시자가 처리하고 세션을 깨우지
 않으므로, 내가 따로 할 일은 없다.
@@ -43,7 +47,7 @@ pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.13.0",
+    version="0.14.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -61,12 +65,15 @@ SETUP_HINT = (
         "지금 알 가치가 있는 일에만 쓴다. 비밀값(토큰·개인키)이 섞이면 거부된다."
     ),
 )
-def slack_notify(text: str, title: str | None = None) -> str:
+def slack_notify(
+    text: str, title: str | None = None, channel: str | None = None
+) -> str:
     """알림을 보낸다.
 
     Args:
         text: 보낼 내용. 무슨 작업이 어떻게 끝났는지 한 줄로.
         title: 앞에 굵게 붙일 라벨. 프로젝트나 태스크 이름.
+        channel: 보낼 곳. 생략하면 열린 스레드, 없으면 설정의 기본값.
     """
     conf = cfg.load()
     if conf is None:
@@ -75,7 +82,16 @@ def slack_notify(text: str, title: str | None = None) -> str:
     body = f"*{title}*\n{text}" if title else text
     # 대화가 열려 있으면 그 스레드로 보낸다. 알림과 답장이 한 자리에 모여야
     # 폰에서 맥락이 끊기지 않는다.
-    thread = chatmod._chat.thread_ts if chatmod._chat else None
+    # 목적지를 명시하면 그곳으로 (스레드에 묶지 않는다). 아니면 열린 스레드.
+    if channel:
+        try:
+            dest = slack.resolve_target(conf.bot_token, channel, conf.channel)
+        except slack.SlackError as e:
+            return f"보내지 못했습니다.\n{e}"
+        thread = None
+    else:
+        dest = chatmod._chat.channel if chatmod._chat else conf.channel
+        thread = chatmod._chat.thread_ts if chatmod._chat else None
 
     # 감시자가 없으면 답장이 바로 읽히지 않는다. 그 사실을 **폰에서** 알아야
     # 한다 — 답을 적어놓고 읽히는 줄 아는 것이 제일 나쁘다.
@@ -83,7 +99,7 @@ def slack_notify(text: str, title: str | None = None) -> str:
     if unwatched:
         body += "\n\n_지금은 감시 중이 아닙니다. 여기 답글을 달아도 바로 읽히지 않습니다._"
     try:
-        res = slack.post_message(conf.bot_token, conf.channel, body, thread_ts=thread)
+        res = slack.post_message(conf.bot_token, dest, body, thread_ts=thread)
     except slack.BodyRejected as e:
         return f"보내지 않았습니다 — {e}"
     except slack.SlackError as e:
@@ -145,11 +161,16 @@ _BOT_ID = ""
         "스레드인지 알아볼 유일한 단서다."
     ),
 )
-def slack_chat_open(hours: float = 10.0, label: str | None = None) -> str:
+def slack_chat_open(
+    hours: float = 10.0, label: str | None = None, channel: str | None = None
+) -> str:
     """대화를 연다.
 
     Args:
         hours: 스레드를 유지할 시간. 기본 10시간.
+        channel: 스레드를 열 곳. 생략하면 설정의 기본값(대개 사용자와의 DM).
+            팀이 같이 봐야 하는 일이면 "#채널명" 으로 지정한다. 채널에서는
+            봇을 @멘션한 소유자의 답글만 지시로 받는다.
         label: 스레드 첫 줄에 붙일 라벨. "프로젝트 · 작업명" 형태로 적는다.
             예: "cafegate 마이그 · 목록 정렬 전수조사".
             생략하면 작업 디렉터리 이름이 들어가는데, 같은 레포에서 작업을
@@ -162,14 +183,16 @@ def slack_chat_open(hours: float = 10.0, label: str | None = None) -> str:
     # 구분하는 유일한 단서라, 비워두면 넷 다 같은 이름으로 보인다.
     label = label or os.path.basename(os.getcwd()) or None
     try:
-        c = chatmod.open_chat(conf.bot_token, conf.channel, hours, label)
+        target = slack.resolve_target(conf.bot_token, channel or "", conf.channel)
+        c = chatmod.open_chat(conf.bot_token, target, hours, label, conf.owner_id)
     except slack.SlackError as e:
         return f"열지 못했습니다.\n{e}"
     # thread ts 를 돌려주는 이유: 이 프로세스 밖에서 도는 감시자(watch)가
     # 어느 스레드를 지켜볼지 알아야 한다. MCP 툴은 내가 부를 때만 도는 pull 이라
     # 그것만으로는 작업 중에 오는 메시지를 알아채지 못한다.
+    where = "DM" if c.channel.startswith("D") else c.channel
     return (
-        f"열렸습니다. 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
+        f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
         "작업 중에도 답장을 즉시 받으려면 감시자를 백그라운드로 띄운다:\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}"

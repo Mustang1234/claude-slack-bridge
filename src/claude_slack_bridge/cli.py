@@ -221,6 +221,7 @@ def cmd_init(argv: list[str]) -> None:
     print("  2) 봇과의 DM   — 초대가 필요 없다 (채널에 앱을 못 넣는 경우)")
     where = input("[1/2] ").strip()
 
+    owner_id = ""
     if where == "2":
         print()
         print("  Slack 에서 본인 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
@@ -231,6 +232,7 @@ def cmd_init(argv: list[str]) -> None:
             channel = slack.conversations_open(token, user_id)
         except slack.SlackError as e:
             _die(f"DM 을 열지 못했습니다.\n{e}")
+        owner_id = user_id
         print(f"  DM 대화: {channel}\n")
     else:
         channel = input("채널 ID (C 로 시작): ").strip()
@@ -256,13 +258,19 @@ def cmd_init(argv: list[str]) -> None:
                 "  관리자로 제한한 것입니다. 그때는 init 을 다시 돌려 2) DM 을 고르세요."
             )
         print("  봇 초대됨: 예\n")
+        # 채널에서는 아무나 세션에 지시할 수 없어야 한다. 누구의 멘션을 내 말로
+        # 받을지 여기서 정해둔다. 비워두면 제한 없이 받는다.
+        print("  채널에서는 봇을 @멘션한 지정된 사람의 답글만 지시로 받습니다.")
+        print("  Slack 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
+        owner_id = input("  내 멤버 ID (U 로 시작, 비우면 제한 없음): ").strip()
+        print()
 
     try:
         slack.post_message(token, channel, "연결됐습니다. 이제 여기로 알림이 옵니다.")
     except slack.SlackError as e:
         _die(f"테스트 메시지 전송 실패.\n{e}")
 
-    path = cfg.save(token, channel)
+    path = cfg.save(token, channel, owner_id)
     print("테스트 메시지를 보냈습니다. 폰에서 확인해 보세요.")
     print(f"설정 저장: {path} (권한 600)\n")
     print("━━ 마지막 · Claude Code 에 붙이기 ━━\n")
@@ -360,6 +368,8 @@ def cmd_watch(argv: list[str]) -> None:
     channel = state["channel"]
     label = state.get("label") or "Claude 세션"
     bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+    require_mention = bool(state.get("require_mention"))
+    owner_id = state.get("owner_id") or conf.owner_id
     awake = _keep_awake()
     threads.patch(thread, watcher_pid=os.getpid())
 
@@ -411,7 +421,8 @@ def cmd_watch(argv: list[str]) -> None:
 
             fresh = [
                 m for m in msgs
-                if float(m.get("ts", 0)) > last_seen and chat.is_human(m, bot_user_id)
+                if float(m.get("ts", 0)) > last_seen
+                and chat.is_for_me(m, bot_user_id, owner_id, require_mention)
             ]
             fresh.sort(key=lambda m: float(m.get("ts", 0)))
 
@@ -420,7 +431,7 @@ def cmd_watch(argv: list[str]) -> None:
                 last_seen = float(m.get("ts", 0))
                 threads.patch(thread, last_seen_ts=last_seen)
 
-                cmd = chat.parse_command(m.get("text", ""))
+                cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
                 if cmd:
                     # 마감 조작은 세션을 깨우지 않고 여기서 끝낸다. 자리를 비운
                     # 사람이 시간을 미루려고 에이전트를 깨울 이유가 없다.
@@ -480,6 +491,27 @@ def cmd_watch(argv: list[str]) -> None:
             threads.patch(thread, watcher_pid=None)
 
 
+def cmd_targets(argv: list[str]) -> None:
+    """보낼 수 있는 곳을 보여준다.
+
+    어디로 보낼 수 있는지 모르는 상태에서 채널 이름을 찍어보는 것은 추측이다.
+    """
+    conf = cfg.load()
+    if conf is None:
+        _die("설정이 없습니다.")
+    print(f"기본값: {conf.channel}" + ("  (봇과의 DM)" if conf.channel.startswith("D") else ""))
+    if conf.owner_id:
+        print(f"소유자: {conf.owner_id}  (채널에서는 이 사람의 멘션만 지시로 받음)")
+    convs = slack.my_conversations(conf.bot_token)
+    if not convs:
+        print("\n봇이 들어가 있는 채널이 없습니다.")
+        print("  → 채널에서 쓰려면 그 채널에서 /invite 로 봇을 초대하세요.")
+        return
+    print("\n봇이 들어가 있는 채널:")
+    for c in convs:
+        print(f"  {'비공개' if c['private'] else '공개  '}  #{c['name']:<24} {c['id']}")
+
+
 def cmd_doctor(argv: list[str]) -> None:
     conf = cfg.load()
     if conf is None:
@@ -515,6 +547,7 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge watch --thread <ts>
                                  답글이 오면 종료한다. 백그라운드로 띄우면
                                  그 종료가 곧 깨움 신호가 된다
+  claude-slack-bridge targets    보낼 수 있는 곳(기본 DM · 초대된 채널)을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
 
@@ -536,6 +569,8 @@ def main() -> None:
         print(TOKEN_HELP)
     elif cmd == "watch":
         cmd_watch(argv[1:])
+    elif cmd == "targets":
+        cmd_targets(argv[1:])
     elif cmd == "doctor":
         cmd_doctor(argv[1:])
     elif cmd in ("-h", "--help", "help"):

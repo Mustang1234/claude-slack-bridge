@@ -125,7 +125,9 @@ def header_text(label: str, deadline: float) -> str:
     )
 
 
-def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat:
+def open_chat(
+    token: str, channel: str, hours: float, label: str | None, owner_id: str = ""
+) -> Chat:
     """대화를 열어 이 세션에 묶는다.
 
     스레드 하나가 세션 하나다. ntfy 의 슬롯 여덟 개가 하던 일을 스레드가 하되,
@@ -150,6 +152,9 @@ def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat
         "deadline": deadline,
         "warned": False,
         "closed": False,
+        # 채널이면 멘션을 요구한다. DM 은 상대가 나뿐이라 필요 없다.
+        "require_mention": not channel.startswith("D"),
+        "owner_id": owner_id,
     })
     return _chat
 
@@ -228,6 +233,39 @@ def is_human(msg: dict, bot_user_id: str) -> bool:
     if msg.get("subtype"):          # 채널 입장/파일 공유 알림 등
         return False
     return bool(msg.get("text") or msg.get("files"))
+
+
+def is_for_me(
+    msg: dict,
+    bot_user_id: str,
+    owner_id: str = "",
+    require_mention: bool = False,
+) -> bool:
+    """이 메시지를 내 세션에 대한 지시로 받아들일지 판정한다.
+
+    DM 은 상대가 한 사람뿐이라 사람이 쓴 것이면 전부 내 말이다.
+
+    채널은 다르다. 옆에서 오가는 대화까지 지시로 삼으면 남이 무심코 쓴 말이
+    내 작업을 움직인다. 그래서 두 겹을 건다.
+
+      - 봇을 @멘션한 것만 — 남이 봐도 "저건 봇한테 하는 말" 이 보인다
+      - 소유자가 쓴 것만 — 채널 멤버 아무나 세션에 명령할 수는 없다
+
+    소유자를 정해두지 않았으면 작성자 제한은 걸지 않는다. 설정이 없다는 이유로
+    조용히 아무 말도 안 듣는 상태가 되면, 고장과 구분되지 않는다.
+    """
+    if not is_human(msg, bot_user_id):
+        return False
+    if owner_id and msg.get("user") != owner_id:
+        return False
+    if require_mention and f"<@{bot_user_id}>" not in (msg.get("text") or ""):
+        return False
+    return True
+
+
+def strip_mention(text: str, bot_user_id: str) -> str:
+    """본문에서 봇 멘션을 걷어낸다. 지시만 남기기 위해서다."""
+    return re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text or "").strip()
 
 
 def describe(msg: dict) -> str:
