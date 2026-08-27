@@ -23,12 +23,16 @@ INSTRUCTIONS = """\
 `slack_notify` 는 조사 완료·장시간 작업 종료·사용자 결정이 필요한 갈림길처럼
 "지금 알아야 하는" 순간에만 쓴다. 즉답이나 수 초 만에 끝난 일에는 쓰지 않는다.
 
+`slack_chat_open` 으로 대화를 열 때는 label 에 프로젝트와 작업명을 함께 적는다.
+세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
+그 라벨이 어느 작업인지 가릴 유일한 단서다.
+
 설정이 없으면 조용히 아무것도 하지 않는다. 그것 때문에 작업을 멈추지 말 것.
 """
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.9.0",
+    version="0.9.1",
     instructions=INSTRUCTIONS,
 )
 
@@ -111,7 +115,10 @@ _BOT_ID = ""
     title="폰과 대화 열기",
     description=(
         "Slack 에 스레드를 하나 열고 이 세션에 묶는다. 사용자가 자리를 비우면서 "
-        "폰으로 이어서 얘기하자고 할 때 쓴다."
+        "폰으로 이어서 얘기하자고 할 때 쓴다. label 에는 반드시 지금 무슨 일을 "
+        "하고 있는지 — 프로젝트와 작업명을 함께 — 적는다. 사용자의 폰에는 세션이 "
+        "여럿 떠 있어도 전부 같은 봇 이름으로 보이므로, 이 라벨이 어느 작업의 "
+        "스레드인지 알아볼 유일한 단서다."
     ),
 )
 def slack_chat_open(hours: float = 4.0, label: str | None = None) -> str:
@@ -119,7 +126,10 @@ def slack_chat_open(hours: float = 4.0, label: str | None = None) -> str:
 
     Args:
         hours: 채널을 유지할 시간. 기본 4시간.
-        label: 스레드 첫 줄에 붙일 라벨. 프로젝트나 태스크 이름.
+        label: 스레드 첫 줄에 붙일 라벨. "프로젝트 · 작업명" 형태로 적는다.
+            예: "cafegate 마이그 · 목록 정렬 전수조사".
+            생략하면 작업 디렉터리 이름이 들어가는데, 같은 레포에서 작업을
+            둘 돌리면 구분되지 않으므로 되도록 직접 적는다.
     """
     conf = cfg.load()
     if conf is None:
