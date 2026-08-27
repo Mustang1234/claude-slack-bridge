@@ -28,16 +28,19 @@ INSTRUCTIONS = """\
 세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
 그 라벨이 어느 작업인지 가릴 유일한 단서다.
 
-대화를 열었으면 **프로세스 둘을 띄운다.** 툴이 돌려주는 명령을 그대로 쓴다.
+대화를 열었으면 **keeper-start 를 먼저, watch 를 다음에** 띄운다. 툴이 돌려주는
+명령을 위에서부터 그대로 쓴다.
 
-  - `keeper-start` — 지킴이를 떼어내 띄운다. 마감·연장·"핑" 을 지킨다. 사용자가
-    Esc 를 눌러도 죽지 않으므로, 그동안에도 폰에서 보낸 말에 반응이 있다.
-  - `watch` — 백그라운드로 띄운다. 나를 깨우는 것만 한다. 답장이 오면 종료하며,
-    그때 결과를 확인하고 답한 뒤 **다시 띄운다.**
+  - `keeper-start` — 지킴이를 떼어내 띄운다. Slack 답장을 파일에 받아 적고,
+    마감·연장·"핑" 을 지킨다. Esc 를 눌러도 죽지 않는다.
+  - `watch` — 백그라운드로 띄운다. 지킴이가 적은 파일만 보다가 답장이 오면 종료해
+    나를 깨운다. 그때 결과를 확인하고 답한 뒤 **다시 띄운다.**
 
-이 툴들은 내가 부를 때만 도는 pull 이라, 감시자가 없으면 다른 작업을 하는 동안
-온 답장을 알아채지 못한다. 감시자가 죽어 있어도 메시지를 잃지는 않는다 — 다음
-감시자가 커서를 이어받아 집어온다. 잃는 것은 즉시성뿐이다.
+Slack 을 듣는 것은 지킴이 하나뿐이라, 순서를 뒤집으면 감시자는 볼 파일을 만드는
+지킴이가 없어 `NO_KEEPER` 로 즉시 끝난다. `NO_KEEPER` 나 `KEEPER_GONE` 이 나오면
+keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 지키는 쪽도 지킴이
+하나뿐이라, 죽은 채 두면 마감이 지나도 스레드가 닫히지 않는다. 감시자가 죽어 있어도
+지킴이가 답장을 파일에 남기므로 다음 감시자가 이어받는다. 잃는 것은 즉시성뿐이다.
 
 세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
 아니라 `slack_chat_attach` 를 쓴다. 새로 열면 폰에 같은 작업의 스레드가 쌓인다.
@@ -56,7 +59,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.17.0",
+    version="0.20.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -203,7 +206,7 @@ def slack_chat_open(
     return (
         f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "다음 둘을 띄운다:\n"
+        "다음 둘을 반드시 이 순서대로 띄운다. 뒤집으면 watch가 NO_KEEPER로 즉시 끝난다:\n"
         f"  claude-slack-bridge keeper-start --thread {c.thread_ts}   (떼어냄 — Esc 에 안 죽음)\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)"
     )
@@ -283,7 +286,7 @@ def slack_chat_attach(
     return (
         f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "다음 둘을 띄우세요:\n"
+        "다음 둘을 반드시 이 순서대로 띄우세요. 뒤집으면 watch가 NO_KEEPER로 즉시 끝납니다:\n"
         f"  claude-slack-bridge keeper-start --thread {c.thread_ts}\n"
         f"  claude-slack-bridge watch --thread {c.thread_ts}"
     )

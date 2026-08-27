@@ -72,17 +72,21 @@ def attach(
         label=label,
         header=header_text(label, deadline),
     )
-    threads.save(thread_ts, {
-        **state,
+    fields = {
         "channel": channel,
-        "thread_ts": thread_ts,
         "label": label,
         "deadline": deadline,
-        "warned": bool(state.get("warned")),
+    }
+    # 읽어둔 상태를 통째로 되쓰면 그 사이 지킴이가 민 수신 커서까지 되감긴다.
+    # 영속화 이전 기록에만 기본값을 보태고, 이미 있는 값은 잠금 안에서 보존한다.
+    defaults = {
+        "warned": False,
         "closed": False,
-        "require_mention": state.get("require_mention", not channel.startswith("D")),
-        "owner_id": state.get("owner_id", ""),
-    })
+        "require_mention": not channel.startswith("D"),
+        "owner_id": "",
+    }
+    fields.update({key: value for key, value in defaults.items() if key not in state})
+    threads.patch(thread_ts, **fields)
     return _chat
 
 
@@ -218,6 +222,8 @@ def open_chat(
         label=head,
         header=header_text(head, deadline),
     )
+    # 이 ts 는 방금 Slack 이 돌려줘 아직 다른 프로세스가 알 수 없다. 기존 상태를
+    # 갱신하는 attach 와 달리 경쟁할 writer 가 없는 최초 생성이라 직접 save 한다.
     threads.save(_chat.thread_ts, {
         "channel": channel,
         "thread_ts": _chat.thread_ts,

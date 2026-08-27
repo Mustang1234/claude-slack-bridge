@@ -348,28 +348,20 @@ def _apply_command(token, channel, thread, label, kind, value, state) -> bool:
 
 
 def cmd_watch(argv: list[str]) -> None:
-    """스레드를 지키다가, 답글이 오면 종료해서 세션을 깨운다.
+    """지킴이가 받아 적은 답글을 보고 종료해서 세션을 깨운다.
 
     MCP 툴은 에이전트가 불러야 도는 pull 이라, 다른 작업을 하는 동안 도착한
     메시지를 알아채지 못한다. 이 명령이 그 구멍을 메운다 — 백그라운드로 띄워
     두면 **프로세스가 끝나는 것 자체가 깨움 신호**가 된다.
 
-    어디까지 읽었는지는 파일에 남긴다. "띄운 시점에 있던 것은 다 읽은 것으로
-    친다" 로 하면, 감시자가 죽어 있던 사이에 온 메시지가 통째로 삼켜진다.
-    실제로 그렇게 한 건을 놓쳤다.
-
-    마감도 여기서 지킨다. 10분 전에 예고하고, 그 창에 답글이 오면 자동 연장한다.
-    폰에서 "연장 3시간" · "마감 18:00" · "닫기" 로 직접 조작할 수도 있다 —
-    그런 줄은 세션을 깨우지 않고 여기서 처리한다.
+    Slack 은 떼어낸 지킴이 하나만 읽는다. 감시자까지 네트워크를 읽으면 같은 API를
+    중복 호출할 뿐 아니라 상태 파일도 함께 밀게 된다. 감시자는 durable inbox 만
+    보므로 Esc 에 죽어도 다음 감시자가 그동안 받아 적힌 말을 이어받는다.
     """
     thread = _arg(argv, "--thread")
     if not thread:
         _die("--thread <스레드 ts> 가 필요합니다. slack_chat_open 이 돌려준 값입니다.")
     interval = float(_arg(argv, "--interval") or 5)
-
-    conf = cfg.load()
-    if conf is None:
-        _die("설정이 없습니다.")
 
     state = threads.load(thread)
     if not state:
@@ -387,109 +379,37 @@ def cmd_watch(argv: list[str]) -> None:
         print(f"ALREADY_WATCHING\t{other}")
         return
 
-    channel = state["channel"]
-    label = state.get("label") or "Claude 세션"
-    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
-    require_mention = bool(state.get("require_mention"))
-    owner_id = state.get("owner_id") or conf.owner_id
+    if not threads.inbox_keeper_alive(thread):
+        print("NO_KEEPER")
+        return
+
     awake = _keep_awake()
-    threads.patch(thread, watcher_pid=os.getpid())
+    state = threads.patch(thread, watcher_pid=os.getpid())
 
-    # 어디까지 읽었는지는 파일이 정본이다. 기록이 없을 때만(첫 감시) 지금 있는
-    # 것을 기준선으로 삼는다.
+    # 이 커서는 Slack 수신 위치가 아니라 세션에 전달을 끝낸 위치다. 지킴이의
+    # keeper_seen_ts 와 섞으면 지킴이가 적어둔 말을 감시자가 건너뛸 수 있다.
     last_seen = float(state.get("last_seen_ts") or 0)
-    if not last_seen:
-        try:
-            msgs = slack.conversations_replies(conf.bot_token, channel, thread)
-        except slack.SlackError as e:
-            _die(f"스레드를 읽지 못했습니다.\n{e}")
-        last_seen = max([float(m.get("ts", 0)) for m in msgs] or [float(thread)])
-        threads.patch(thread, last_seen_ts=last_seen)
 
-    fails = 0
     try:
         while True:
             state = threads.load(thread) or state
-            deadline = float(state.get("deadline") or 0)
-            warned = bool(state.get("warned"))
-            remaining = deadline - time.time()
-
-            if remaining <= 0:
-                chat.close_thread(conf.bot_token, channel, thread, label, "마감 시각 도달")
-                print("DEADLINE_CLOSED")
+            if state.get("closed"):
+                print("CLOSED")
                 return
 
-            if not warned and remaining <= chat.WARN_LEAD:
-                try:
-                    slack.post_message(
-                        conf.bot_token, channel, chat.warn_text(remaining), thread_ts=thread
+            if not threads.inbox_keeper_alive(thread):
+                print("KEEPER_GONE")
+                return
+
+            fresh = threads.read_inbox(thread, last_seen)
+            if fresh:
+                for record in fresh:
+                    print(
+                        f"MESSAGE\t{record.get('ts')}\t{record.get('summary', '')}",
+                        flush=True,
                     )
-                    threads.patch(thread, warned=True)
-                except slack.SlackError:
-                    pass
-
-            try:
-                msgs = slack.conversations_replies(conf.bot_token, channel, thread)
-                fails = 0
-            except slack.SlackError as e:
-                # 단발 실패는 넘어간다. 계속 실패하면 지켜보는 척하지 않는다 —
-                # 살아만 있고 아무것도 못 보는 상태가 제일 나쁘다.
-                fails += 1
-                if fails >= 5:
-                    print(f"WATCH_FAILED\t{e}".replace("\n", " "))
-                    raise SystemExit(1)
-                time.sleep(interval)
-                continue
-
-            fresh = [
-                m for m in msgs
-                if float(m.get("ts", 0)) > last_seen
-                and chat.is_for_me(m, bot_user_id, owner_id, require_mention)
-            ]
-            fresh.sort(key=lambda m: float(m.get("ts", 0)))
-
-            wake = []
-            for m in fresh:
-                last_seen = float(m.get("ts", 0))
+                last_seen = max(float(record.get("ts", 0)) for record in fresh)
                 threads.patch(thread, last_seen_ts=last_seen)
-
-                cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
-                if cmd:
-                    # 마감 조작은 세션을 깨우지 않고 여기서 끝낸다. 자리를 비운
-                    # 사람이 시간을 미루려고 에이전트를 깨울 이유가 없다.
-                    closed = _apply_command(
-                        conf.bot_token, channel, thread, label,
-                        cmd[0], cmd[1], threads.load(thread) or state,
-                    )
-                    if closed:
-                        print("CLOSED_BY_USER")
-                        return
-                    continue
-
-                if warned:
-                    # 예고 창 안에 답이 왔다 = 자리에 있다는 신호다.
-                    st = threads.load(thread) or state
-                    base = max(float(st.get("deadline") or time.time()), time.time())
-                    new_deadline = base + chat.AUTO_EXTEND_HOURS * 3600
-                    threads.patch(thread, deadline=new_deadline, warned=False)
-                    warned = False
-                    try:
-                        slack.chat_update(
-                            conf.bot_token, channel, thread,
-                            chat.header_text(label, new_deadline),
-                        )
-                    except slack.SlackError:
-                        pass
-                wake.append(m)
-
-            if wake:
-                # 수신확인은 여기서 하지 않는다. 감시자는 곧바로 종료해 세션을
-                # 깨워야 하므로 "답이 붙는지" 를 지켜볼 수 없고, 무조건 보내면
-                # 대부분의 경우 바로 뒤에 진짜 답이 붙어 같은 말이 두 번 된다.
-                # 그건 지킴이가 10초 세어 보고 판단한다.
-                for m in wake:
-                    first = chat.describe(m).replace("\n", " ")[:120]
-                    print(f"MESSAGE\t{m.get('ts')}\t{first}")
                 return
 
             time.sleep(interval)
@@ -533,15 +453,21 @@ def cmd_keeper(argv: list[str]) -> None:
 
     channel = state["channel"]
     label = state.get("label") or "Claude 세션"
-    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
-    require_mention = bool(state.get("require_mention"))
-    owner_id = state.get("owner_id") or conf.owner_id
     awake = _keep_awake()
-    threads.patch(thread, keeper_pid=os.getpid())
+    state = threads.patch(
+        thread,
+        keeper_pid=os.getpid(),
+        keeper_protocol=threads.KEEPER_PROTOCOL,
+    )
 
-    seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
-    pending: list[float] = []   # 수신확인을 보낼지 유예 중인 메시지들
     try:
+        # keeper-start 는 프로세스가 살아 있는지만 확인하고 돌아온다. 인증이 느린 날
+        # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
+        bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+        require_mention = bool(state.get("require_mention"))
+        owner_id = state.get("owner_id") or conf.owner_id
+        seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
+        pending: list[float] = []   # 수신확인을 보낼지 유예 중인 메시지들
         while True:
             if parent and not _pid_alive(int(parent)):
                 print("PARENT_GONE")
@@ -584,8 +510,7 @@ def cmd_keeper(argv: list[str]) -> None:
             fresh.sort(key=lambda m: float(m.get("ts", 0)))
 
             for m in fresh:
-                seen = float(m.get("ts", 0))
-                threads.patch(thread, keeper_seen_ts=seen)
+                message_ts = float(m.get("ts", 0))
                 cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
                 if cmd:
                     if _apply_command(
@@ -594,11 +519,35 @@ def cmd_keeper(argv: list[str]) -> None:
                     ):
                         print("CLOSED_BY_USER")
                         return
+                    seen = message_ts
+                    threads.patch(thread, keeper_seen_ts=seen)
                     continue
+
+                summary = chat.describe(m).replace("\n", " ")[:120]
+                threads.append_inbox(thread, m, summary)
+                # append와 fsync가 끝난 뒤에만 Slack 커서를 민다. 이 순서가 뒤집히면
+                # 둘 사이의 크래시가 메시지를 영구히 건너뛰게 한다.
+                seen = message_ts
+                threads.patch(thread, keeper_seen_ts=seen)
+
+                # 예고를 본 뒤 온 일반 답글은 자리에 있다는 신호다. inbox 기록과
+                # 커서 전진을 먼저 끝내야 연장 도중 죽어도 메시지 자체는 남는다.
+                current = threads.load(thread) or state
+                if current.get("warned"):
+                    base = max(float(current.get("deadline") or time.time()), time.time())
+                    new_deadline = base + chat.AUTO_EXTEND_HOURS * 3600
+                    threads.patch(thread, deadline=new_deadline, warned=False)
+                    try:
+                        slack.chat_update(
+                            conf.bot_token, channel, thread,
+                            chat.header_text(label, new_deadline),
+                        )
+                    except slack.SlackError:
+                        pass
 
                 # 지금 답하지 않고 적어둔다. 대부분은 몇 초 안에 진짜 답이
                 # 붙으므로, 그때 "받았습니다" 는 소음일 뿐이다.
-                pending.append(float(m.get("ts", 0)))
+                pending.append(message_ts)
 
             # 유예가 지난 것 중 아직 답이 안 붙은 것만 알린다.
             still = []
@@ -628,7 +577,7 @@ def cmd_keeper(argv: list[str]) -> None:
             awake.terminate()
         st = threads.load(thread) or {}
         if st.get("keeper_pid") == os.getpid():
-            threads.patch(thread, keeper_pid=None)
+            threads.patch(thread, keeper_pid=None, keeper_protocol=None)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -652,8 +601,13 @@ def cmd_keeper_start(argv: list[str]) -> None:
     if not thread:
         _die("--thread <스레드 ts> 가 필요합니다.")
 
-    if threads.keeper_alive(thread):
+    if threads.inbox_keeper_alive(thread):
         print(f"ALREADY_KEEPING\t{(threads.load(thread) or {}).get('keeper_pid')}")
+        return
+    if threads.keeper_alive(thread):
+        stale_pid = (threads.load(thread) or {}).get("keeper_pid")
+        print(f"STALE_KEEPER\t{stale_pid}")
+        print("기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요.")
         return
 
     cmd = [sys.argv[0], "keeper", "--thread", thread]
