@@ -125,6 +125,16 @@ def post_message(token: str, channel: str, text: str, thread_ts: str | None = No
     return api(token, "chat.postMessage", payload)
 
 
+def chat_update(token: str, channel: str, ts: str, text: str) -> dict:
+    """이미 보낸 내 메시지를 고쳐 쓴다.
+
+    스레드를 닫을 때 머리글에 취소선을 긋는 데 쓴다. 답글로 "닫혔다" 고 적는
+    것만으로는 스레드를 펼쳐야 알 수 있는데, 머리글이 그어져 있으면 대화 목록
+    에서 바로 보인다.
+    """
+    return api(token, "chat.update", {"channel": channel, "ts": ts, "text": text})
+
+
 def conversations_info(token: str, channel: str) -> dict:
     return api(token, "conversations.info", {"channel": channel}, form=True)
 

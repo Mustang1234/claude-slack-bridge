@@ -18,6 +18,7 @@ from importlib import resources
 from . import chat
 from . import config as cfg
 from . import slack
+from . import threads
 
 MANIFEST_NAME = "slack-app-manifest.yaml"
 
@@ -266,45 +267,84 @@ def cmd_init(argv: list[str]) -> None:
 
 
 def cmd_watch(argv: list[str]) -> None:
-    """스레드에 사람 답글이 생길 때까지 기다렸다가 종료한다.
+    """스레드를 지키다가, 답글이 오면 종료해서 세션을 깨운다.
 
     MCP 툴은 에이전트가 불러야 도는 pull 이라, 다른 작업을 하는 동안 도착한
-    메시지를 알아채지 못한다. 이 명령은 그 구멍을 메운다 — 백그라운드로 띄워
+    메시지를 알아채지 못한다. 이 명령이 그 구멍을 메운다 — 백그라운드로 띄워
     두면 **프로세스가 끝나는 것 자체가 깨움 신호**가 된다.
 
-    받아 적는 일은 하지 않는다. 그건 Slack 이 이미 하고 있다. ntfy 가 보유자와
-    감시자를 둘로 나눠야 했던 이유(브로커에 이력이 없어 누군가 계속 받아 적어야
-    했던 것)가 여기서는 사라진다. 이 프로세스가 죽어도 메시지는 스레드에 남아
-    있으므로, 다시 띄우면 그동안 온 것을 그대로 본다.
+    받아 적지는 않는다. 그건 Slack 이 이미 한다. 이 프로세스가 죽어 있는 동안
+    온 메시지도 스레드에 남아 있으므로, 다시 띄우면 그동안 온 것을 그대로 본다.
+
+    마감도 여기서 지킨다. 10분 전에 예고하고, 그 창에 답글이 오면 자리에 있다는
+    뜻이므로 자동 연장한다. 답이 없으면 머리글에 취소선을 긋고 닫는다.
     """
     thread = _arg(argv, "--thread")
     if not thread:
         _die("--thread <스레드 ts> 가 필요합니다. slack_chat_open 이 돌려준 값입니다.")
-    max_hours = float(_arg(argv, "--max-hours") or 8)
     interval = float(_arg(argv, "--interval") or 5)
 
     conf = cfg.load()
     if conf is None:
         _die("설정이 없습니다.")
 
+    state = threads.load(thread)
+    if not state:
+        _die(
+            f"이 스레드의 기록이 없습니다: {thread}\n"
+            "  → slack_chat_open 으로 연 스레드여야 합니다."
+        )
+    if state.get("closed"):
+        _die("이미 닫힌 스레드입니다.")
+
+    channel = state["channel"]
+    label = state.get("label") or "Claude 세션"
     bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
 
     # 지금 이미 있는 것은 "새 메시지"가 아니다. 시작 시점을 기준선으로 잡는다.
     try:
         seen = {
             m.get("ts", "")
-            for m in slack.conversations_replies(conf.bot_token, conf.channel, thread)
+            for m in slack.conversations_replies(conf.bot_token, channel, thread)
         }
     except slack.SlackError as e:
         _die(f"스레드를 읽지 못했습니다.\n{e}")
 
-    deadline = time.time() + max_hours * 3600
-    while time.time() < deadline:
+    fails = 0
+    while True:
         time.sleep(interval)
+
+        # 마감은 파일이 정본이다. slack_chat_extend 로 늘린 것이 여기 반영된다.
+        state = threads.load(thread) or state
+        deadline = float(state.get("deadline") or 0)
+        warned = bool(state.get("warned"))
+        remaining = deadline - time.time()
+
+        if remaining <= 0:
+            chat.close_thread(conf.bot_token, channel, thread, label, "마감 시각 도달")
+            print("DEADLINE_CLOSED")
+            return
+
+        if not warned and remaining <= chat.WARN_LEAD:
+            try:
+                slack.post_message(
+                    conf.bot_token, channel, chat.warn_text(remaining), thread_ts=thread
+                )
+                threads.patch(thread, warned=True)
+                warned = True
+            except slack.SlackError:
+                pass
+
         try:
-            msgs = slack.conversations_replies(conf.bot_token, conf.channel, thread)
-        except slack.SlackError:
-            # 한 번의 네트워크 실패로 감시를 끝내지 않는다. 다음 주기에 다시 본다.
+            msgs = slack.conversations_replies(conf.bot_token, channel, thread)
+            fails = 0
+        except slack.SlackError as e:
+            # 단발 실패는 넘어간다. 계속 실패하면 조용히 지켜보는 척하지 않는다 —
+            # 감시자가 살아만 있고 아무것도 못 보는 상태가 제일 나쁘다.
+            fails += 1
+            if fails >= 5:
+                print(f"WATCH_FAILED\t{e}".replace("\n", " "))
+                raise SystemExit(1)
             continue
 
         fresh = [
@@ -312,14 +352,28 @@ def cmd_watch(argv: list[str]) -> None:
             if m.get("ts") not in seen and chat.is_human(m, bot_user_id)
         ]
         if fresh:
+            if warned:
+                # 예고 창 안에 답이 왔다 = 자리에 있다는 신호다.
+                new_deadline = max(deadline, time.time()) + chat.AUTO_EXTEND_HOURS * 3600
+                threads.patch(thread, deadline=new_deadline, warned=False)
+                try:
+                    slack.chat_update(
+                        conf.bot_token, channel, thread,
+                        chat.header_text(label, new_deadline),
+                    )
+                    slack.post_message(
+                        conf.bot_token, channel,
+                        f"답글을 받아 마감을 {chat.fmt_remaining(new_deadline - time.time())} "
+                        "뒤로 미뤘습니다.",
+                        thread_ts=thread,
+                    )
+                except slack.SlackError:
+                    pass
             for m in fresh:
                 first = chat.describe(m).replace("\n", " ")[:120]
                 print(f"MESSAGE\t{m.get('ts')}\t{first}")
             return
         seen.update(m.get("ts", "") for m in msgs)
-
-    # 수명이 찼을 뿐 스레드는 멀쩡하다. 다시 띄우면 된다.
-    print("WATCH_RECYCLE")
 
 
 def cmd_doctor(argv: list[str]) -> None:

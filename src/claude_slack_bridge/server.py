@@ -27,12 +27,18 @@ INSTRUCTIONS = """\
 세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
 그 라벨이 어느 작업인지 가릴 유일한 단서다.
 
+대화를 열었으면 **반드시 감시자를 백그라운드로 띄운다** — 툴이 돌려주는
+`watch --thread ...` 명령을 백그라운드 실행한다. 이 툴들은 내가 부를 때만 도는
+pull 이라, 감시자가 없으면 다른 작업을 하는 동안 온 답장을 알아채지 못한다.
+감시자가 끝나면(답장 도착 또는 마감) 그 결과를 확인하고, 답장이었다면 답한 뒤
+감시자를 다시 띄운다.
+
 설정이 없으면 조용히 아무것도 하지 않는다. 그것 때문에 작업을 멈추지 말 것.
 """
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.10.1",
+    version="0.11.1",
     instructions=INSTRUCTIONS,
 )
 
@@ -192,8 +198,11 @@ def slack_wait_reply(timeout_seconds: int = 600) -> str:
     description="열린 대화의 마감을 미룬다.",
 )
 def slack_chat_extend(hours: float = 2.0) -> str:
+    conf = cfg.load()
+    if conf is None:
+        return SETUP_HINT
     try:
-        c = chatmod.extend(hours)
+        c = chatmod.extend(conf.bot_token, hours)
     except chatmod.NoChat as e:
         return str(e)
     return f"연장했습니다. 마감까지 {chatmod.fmt_remaining(c.remaining)}."
@@ -208,7 +217,14 @@ def slack_chat_close() -> str:
     conf = cfg.load()
     if conf is None:
         return SETUP_HINT
+    thread_ts = chatmod._chat.thread_ts if chatmod._chat else None
     chatmod.close_chat(conf.bot_token)
+    if thread_ts:
+        return (
+            "닫았습니다. 머리글에 취소선을 그었습니다.\n"
+            "돌고 있는 감시자가 있으면 함께 내려주세요 "
+            f"(watch --thread {thread_ts})."
+        )
     return "닫았습니다."
 
 
