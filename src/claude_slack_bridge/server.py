@@ -32,7 +32,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.9.1",
+    version="0.10.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -141,7 +141,15 @@ def slack_chat_open(hours: float = 4.0, label: str | None = None) -> str:
         c = chatmod.open_chat(conf.bot_token, conf.channel, hours, label)
     except slack.SlackError as e:
         return f"열지 못했습니다.\n{e}"
-    return f"열렸습니다. 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다."
+    # thread ts 를 돌려주는 이유: 이 프로세스 밖에서 도는 감시자(watch)가
+    # 어느 스레드를 지켜볼지 알아야 한다. MCP 툴은 내가 부를 때만 도는 pull 이라
+    # 그것만으로는 작업 중에 오는 메시지를 알아채지 못한다.
+    return (
+        f"열렸습니다. 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
+        f"thread={c.thread_ts}\n"
+        "작업 중에도 답장을 즉시 받으려면 감시자를 백그라운드로 띄운다:\n"
+        f"  claude-slack-bridge watch --thread {c.thread_ts}"
+    )
 
 
 @server.tool(

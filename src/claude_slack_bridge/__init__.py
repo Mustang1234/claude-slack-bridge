@@ -1,3 +1,3 @@
 """Claude Code 세션과 Slack 을 잇는 MCP 서버."""
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"

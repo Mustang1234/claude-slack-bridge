@@ -12,8 +12,10 @@ from __future__ import annotations
 import getpass
 import re
 import sys
+import time
 from importlib import resources
 
+from . import chat
 from . import config as cfg
 from . import slack
 
@@ -23,6 +25,15 @@ MANIFEST_NAME = "slack-app-manifest.yaml"
 def _die(msg: str) -> None:
     print(msg, file=sys.stderr)
     raise SystemExit(1)
+
+
+def _arg(argv: list[str], name: str) -> str | None:
+    """--name value 한 쌍을 꺼낸다. 없으면 None."""
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
 
 
 def read_manifest() -> str:
@@ -254,6 +265,63 @@ def cmd_init(argv: list[str]) -> None:
     print("  claude mcp add claude-slack-bridge -s user -- uvx claude-slack-bridge\n")
 
 
+def cmd_watch(argv: list[str]) -> None:
+    """스레드에 사람 답글이 생길 때까지 기다렸다가 종료한다.
+
+    MCP 툴은 에이전트가 불러야 도는 pull 이라, 다른 작업을 하는 동안 도착한
+    메시지를 알아채지 못한다. 이 명령은 그 구멍을 메운다 — 백그라운드로 띄워
+    두면 **프로세스가 끝나는 것 자체가 깨움 신호**가 된다.
+
+    받아 적는 일은 하지 않는다. 그건 Slack 이 이미 하고 있다. ntfy 가 보유자와
+    감시자를 둘로 나눠야 했던 이유(브로커에 이력이 없어 누군가 계속 받아 적어야
+    했던 것)가 여기서는 사라진다. 이 프로세스가 죽어도 메시지는 스레드에 남아
+    있으므로, 다시 띄우면 그동안 온 것을 그대로 본다.
+    """
+    thread = _arg(argv, "--thread")
+    if not thread:
+        _die("--thread <스레드 ts> 가 필요합니다. slack_chat_open 이 돌려준 값입니다.")
+    max_hours = float(_arg(argv, "--max-hours") or 8)
+    interval = float(_arg(argv, "--interval") or 5)
+
+    conf = cfg.load()
+    if conf is None:
+        _die("설정이 없습니다.")
+
+    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+
+    # 지금 이미 있는 것은 "새 메시지"가 아니다. 시작 시점을 기준선으로 잡는다.
+    try:
+        seen = {
+            m.get("ts", "")
+            for m in slack.conversations_replies(conf.bot_token, conf.channel, thread)
+        }
+    except slack.SlackError as e:
+        _die(f"스레드를 읽지 못했습니다.\n{e}")
+
+    deadline = time.time() + max_hours * 3600
+    while time.time() < deadline:
+        time.sleep(interval)
+        try:
+            msgs = slack.conversations_replies(conf.bot_token, conf.channel, thread)
+        except slack.SlackError:
+            # 한 번의 네트워크 실패로 감시를 끝내지 않는다. 다음 주기에 다시 본다.
+            continue
+
+        fresh = [
+            m for m in msgs
+            if m.get("ts") not in seen and chat.is_human(m, bot_user_id)
+        ]
+        if fresh:
+            for m in fresh:
+                first = chat.describe(m).replace("\n", " ")[:120]
+                print(f"MESSAGE\t{m.get('ts')}\t{first}")
+            return
+        seen.update(m.get("ts", "") for m in msgs)
+
+    # 수명이 찼을 뿐 스레드는 멀쩡하다. 다시 띄우면 된다.
+    print("WATCH_RECYCLE")
+
+
 def cmd_doctor(argv: list[str]) -> None:
     conf = cfg.load()
     if conf is None:
@@ -286,6 +354,9 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge manifest   Slack 콘솔에 붙여넣을 앱 매니페스트를 출력한다
                                  --name "이름" 으로 봇 이름을 바꿀 수 있다
   claude-slack-bridge token-help  Bot User OAuth Token 받는 법을 출력한다
+  claude-slack-bridge watch --thread <ts>
+                                 답글이 오면 종료한다. 백그라운드로 띄우면
+                                 그 종료가 곧 깨움 신호가 된다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
 
@@ -305,6 +376,8 @@ def main() -> None:
         cmd_manifest(argv[1:])
     elif cmd == "token-help":
         print(TOKEN_HELP)
+    elif cmd == "watch":
+        cmd_watch(argv[1:])
     elif cmd == "doctor":
         cmd_doctor(argv[1:])
     elif cmd in ("-h", "--help", "help"):
