@@ -361,7 +361,9 @@ def cmd_watch(argv: list[str]) -> None:
     thread = _arg(argv, "--thread")
     if not thread:
         _die("--thread <스레드 ts> 가 필요합니다. slack_chat_open 이 돌려준 값입니다.")
-    interval = float(_arg(argv, "--interval") or 5)
+    # 지킴이(5초)와 달리 여기는 로컬 파일만 읽는다. 네트워크도 API 예산도 쓰지
+    # 않으므로 촘촘히 봐도 비용이 없고, 그만큼 깨우는 시각이 당겨진다.
+    interval = float(_arg(argv, "--interval") or 1)
 
     state = threads.load(thread)
     if not state:
@@ -390,16 +392,25 @@ def cmd_watch(argv: list[str]) -> None:
     # keeper_seen_ts 와 섞으면 지킴이가 적어둔 말을 감시자가 건너뛸 수 있다.
     last_seen = float(state.get("last_seen_ts") or 0)
 
+    # 생존·닫힘 확인은 ps 를 띄운다. 답장 확인(파일 한 번 읽기)만큼 자주 돌리면
+    # 매초 프로세스를 포크하게 되므로, 촘촘해진 것은 답장 쪽만이고 이쪽은 원래
+    # 주기를 지킨다.
+    health_every = 5.0
+    last_health = 0.0
+
     try:
         while True:
-            state = threads.load(thread) or state
-            if state.get("closed"):
-                print("CLOSED")
-                return
+            now = time.monotonic()
+            if now - last_health >= health_every:
+                last_health = now
+                state = threads.load(thread) or state
+                if state.get("closed"):
+                    print("CLOSED")
+                    return
 
-            if not threads.inbox_keeper_alive(thread):
-                print("KEEPER_GONE")
-                return
+                if not threads.inbox_keeper_alive(thread):
+                    print("KEEPER_GONE")
+                    return
 
             fresh = threads.read_inbox(thread, last_seen)
             if fresh:

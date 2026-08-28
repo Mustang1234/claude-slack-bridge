@@ -35,7 +35,13 @@ INSTRUCTIONS = """\
   - `keeper-start` — 지킴이를 떼어내 띄운다. Slack 답장을 파일에 받아 적고,
     마감·연장·"핑" 을 지킨다. Esc 를 눌러도 죽지 않는다.
   - `watch` — 백그라운드로 띄운다. 지킴이가 적은 파일만 보다가 답장이 오면 종료해
-    나를 깨운다. 그때 결과를 확인하고 답한 뒤 **다시 띄운다.**
+    나를 깨운다. 깨어나면 **답을 짓기 전에 먼저 다시 띄우고** 그 다음에 답한다.
+
+답한 뒤에 띄우면, 답을 짓는 동안 감시자가 없다. 그 사이에 온 말은 지킴이가 받아
+적어 두므로 잃지는 않지만 내가 답을 끝낼 때까지 도착하지 않는다 — 사용자가 터미널
+에서처럼 연달아 던진 두 번째 말이 한 박자 늦게 오는 것이 이 때문이다. 먼저 띄우면
+답하는 도중에도 깨어난다. 한 번 깨어날 때 밀린 말은 한꺼번에 오므로(감시자는 커서
+뒤의 것을 모두 출력하고 끝낸다) 여러 개를 던져도 순서대로 다 받는다.
 
 Slack 을 듣는 것은 지킴이 하나뿐이라, 순서를 뒤집으면 감시자는 볼 파일을 만드는
 지킴이가 없어 `NO_KEEPER` 로 즉시 끝난다. `NO_KEEPER` 나 `KEEPER_GONE` 이 나오면
@@ -61,7 +67,7 @@ keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.22.1",
+    version="0.23.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -256,7 +262,8 @@ def slack_chat_open(
         f"thread={c.thread_ts}\n"
         "다음 둘을 반드시 이 순서대로 띄운다. 뒤집으면 watch가 NO_KEEPER로 즉시 끝난다:\n"
         f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}   (떼어냄 — Esc 에 안 죽음)\n"
-        f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)"
+        f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)\n"
+        "감시자가 깨우면 답하기 전에 watch 를 먼저 다시 띄운다 — 답하는 동안 온 말도 곧바로 받는다."
     )
 
 
@@ -337,7 +344,8 @@ def slack_chat_attach(
         f"thread={c.thread_ts}\n"
         "다음 둘을 반드시 이 순서대로 띄우세요. 뒤집으면 watch가 NO_KEEPER로 즉시 끝납니다:\n"
         f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}\n"
-        f"  claude-slack-bridge watch --thread {c.thread_ts}"
+        f"  claude-slack-bridge watch --thread {c.thread_ts}\n"
+        "감시자가 깨우면 답하기 전에 watch 를 먼저 다시 띄운다 — 답하는 동안 온 말도 곧바로 받는다."
     )
 
 
