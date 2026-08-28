@@ -73,11 +73,15 @@ chmod 600 ~/.claude-slack-bridge/config.json
 ## 4. Claude Code 에 붙이기
 
 ```bash
-claude mcp add claude-slack-bridge -s user -- uvx claude-slack-bridge
+claude mcp add claude-slack-bridge -s user -- \
+  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge
 ```
 
 `-s user` 는 모든 프로젝트에서 쓰겠다는 뜻이다. 알림은 어느 프로젝트에서 일하든
 받아야 하므로 이 범위가 맞다.
+
+`--from` 을 빼면 안 된다. 이 패키지는 PyPI 에 없어서 uvx 가 가져올 곳을 모르고,
+`No solution found when resolving tool dependencies` 로 떨어진다.
 
 설정이 없으면 조용히 아무것도 하지 않는다. 설치만 해두고 나중에 설정해도 흐름이
 깨지지 않는다.
