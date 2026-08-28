@@ -207,7 +207,11 @@ def strikeable(label: str) -> str:
 
 
 def header_text(label: str, deadline: float) -> str:
-    until = time.strftime("%H:%M", time.localtime(deadline))
+    # 마감이 오늘이 아니면 날짜까지 적는다. 시:분만 찍으면 "7일 뒤 00:00" 이
+    # "오늘 00:00" 과 똑같이 보여, 연장해 두고도 연장이 안 된 것처럼 읽힌다.
+    at = time.localtime(deadline)
+    today = time.localtime()[:3]
+    until = time.strftime("%H:%M" if at[:3] == today else "%-m/%-d %H:%M", at)
     return (
         f"*{label}* — 대화를 엽니다. (마감 {until})\n"
         "이 메시지의 스레드에 답글을 달면 이 세션이 이어받습니다."
