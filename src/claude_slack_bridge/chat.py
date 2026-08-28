@@ -194,6 +194,18 @@ def deadline_from_hhmm(hour: int, minute: int, now: float | None = None) -> floa
     return target
 
 
+def strikeable(label: str) -> str:
+    """취소선 안에 넣을 라벨에서 `~` 를 걷어낸다.
+
+    mrkdwn 에는 이스케이프가 없다. 라벨이 `~` 를 하나라도 품고 있으면 바깥
+    `~...~` 의 짝이 깨지고, 그러면 바로 뒤의 `*굵게*` 까지 리터럴로 떨어진다 —
+    기간을 `8/22~8/26` 로 적은 라벨에서 실제로 났다. 실측(Slack 이 돌려준
+    rich_text 의 style): 라벨의 `~` 만 바꾸면 취소선과 굵게가 둘 다 산다.
+    머리글(`*label*`)은 `~` 가 있어도 멀쩡하므로 여기서만 손댄다.
+    """
+    return label.replace("~", "∼")  # 생김새는 같고 서식 문자가 아니다
+
+
 def header_text(label: str, deadline: float) -> str:
     until = time.strftime("%H:%M", time.localtime(deadline))
     return (
@@ -267,7 +279,7 @@ def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: s
     try:
         slack.chat_update(
             token, channel, thread_ts,
-            f"~*{label}* — 종료됨 ({stamp})~\n_{reason}_",
+            f"~*{strikeable(label)}* — 종료됨 ({stamp})~\n_{reason}_",
         )
     except slack.SlackError:
         notified = False

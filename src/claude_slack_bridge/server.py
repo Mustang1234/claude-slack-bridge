@@ -61,7 +61,7 @@ keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.22.0",
+    version="0.22.1",
     instructions=INSTRUCTIONS,
 )
 
