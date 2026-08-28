@@ -57,7 +57,9 @@ def attach(
     if not channel:
         raise NoChat("어느 대화의 스레드인지 알 수 없습니다. channel 을 함께 주세요.")
 
+    requested_label = label
     label = label or state.get("label") or "Claude 세션"
+    label_changed = bool(requested_label) and label != state.get("label")
     if hours is not None:
         deadline = time.time() + hours * 3600
     elif state.get("deadline"):
@@ -87,6 +89,16 @@ def attach(
     }
     fields.update({key: value for key, value in defaults.items() if key not in state})
     threads.patch(thread_ts, **fields)
+    if label_changed:
+        try:
+            slack.chat_update(
+                token, channel, thread_ts,
+                header_text(label, deadline),
+            )
+        except slack.SlackError:
+            # 머리글 갱신에 실패해도 붙기와 라벨 영속화는 끝난 상태다. 표시가
+            # 어긋나는 것보다 세션이 스레드에 붙지 못하는 쪽이 더 나쁘다.
+            pass
     return _chat
 
 

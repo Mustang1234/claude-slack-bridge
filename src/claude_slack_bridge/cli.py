@@ -718,7 +718,9 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge token-help  Bot User OAuth Token 받는 법을 출력한다
   claude-slack-bridge watch --thread <ts>
                                  답글이 오면 종료한다. 백그라운드로 띄우면
-                                 그 종료가 곧 깨움 신호가 된다
+                                 그 종료가 곧 깨움 신호가 된다. Claude Code 세션은
+                                 보통 Monitor 로 inbox 를 tail 하므로 필요 없으며,
+                                 tmux·Claude 밖 환경을 위한 폴백이다
   claude-slack-bridge keeper-start --thread <ts>
                                  지킴이를 떼어내 띄운다. 마감·연장·핑을 지키며
                                  Esc 에 죽지 않는다 (깨우지는 않는다)

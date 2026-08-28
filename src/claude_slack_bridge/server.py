@@ -29,25 +29,20 @@ INSTRUCTIONS = """\
 세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
 그 라벨이 어느 작업인지 가릴 유일한 단서다.
 
-대화를 열었으면 **keeper-start 를 먼저, watch 를 다음에** 띄운다. 툴이 돌려주는
-명령을 위에서부터 그대로 쓴다.
+대화를 열었으면 지킴이를 띄우고, Claude Code 의 Monitor 툴(persistent)로 툴이
+돌려주는 inbox 절대경로를 `tail -n 0 -F` 한다.
 
   - `keeper-start` — 지킴이를 떼어내 띄운다. Slack 답장을 파일에 받아 적고,
     마감·연장·"핑" 을 지킨다. Esc 를 눌러도 죽지 않는다.
-  - `watch` — 백그라운드로 띄운다. 지킴이가 적은 파일만 보다가 답장이 오면 종료해
-    나를 깨운다. 깨어나면 **답을 짓기 전에 먼저 다시 띄우고** 그 다음에 답한다.
+  - Monitor — persistent 로 inbox 를 계속 tail 한다. stdout 한 줄마다 나를 깨우며,
+    Esc 에도 살아남고 세션 종료·TaskStop 때만 내려간다. 같은 Monitor 에서 지킴이
+    pid 도 확인해, 사라지면 `KEEPER_GONE` 한 줄을 출력하게 한다.
 
-답한 뒤에 띄우면, 답을 짓는 동안 감시자가 없다. 그 사이에 온 말은 지킴이가 받아
-적어 두므로 잃지는 않지만 내가 답을 끝낼 때까지 도착하지 않는다 — 사용자가 터미널
-에서처럼 연달아 던진 두 번째 말이 한 박자 늦게 오는 것이 이 때문이다. 먼저 띄우면
-답하는 도중에도 깨어난다. 한 번 깨어날 때 밀린 말은 한꺼번에 오므로(감시자는 커서
-뒤의 것을 모두 출력하고 끝낸다) 여러 개를 던져도 순서대로 다 받는다.
-
-Slack 을 듣는 것은 지킴이 하나뿐이라, 순서를 뒤집으면 감시자는 볼 파일을 만드는
-지킴이가 없어 `NO_KEEPER` 로 즉시 끝난다. `NO_KEEPER` 나 `KEEPER_GONE` 이 나오면
-keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 지키는 쪽도 지킴이
-하나뿐이라, 죽은 채 두면 마감이 지나도 스레드가 닫히지 않는다. 감시자가 죽어 있어도
-지킴이가 답장을 파일에 남기므로 다음 감시자가 이어받는다. 잃는 것은 즉시성뿐이다.
+Monitor 는 Slack 이 아니라 파일만 보므로 keeper-start 와 기동 순서 제약이 없고
+`NO_KEEPER` 개념도 없다. `KEEPER_GONE` 이 나오면 keeper-start 를 다시 띄운다.
+마감을 상시 지키는 쪽은 지킴이 하나뿐이라, 죽은 채 두면 마감이 지나도 스레드가
+닫히지 않는다. Monitor 가 내려가 있어도 지킴이가 답장을 파일에 남기므로 다시 tail
+할 수 있다. 잃는 것은 즉시성뿐이다.
 세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack 스레드도 닫는다.
 
 세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
@@ -59,7 +54,7 @@ keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 
 받는다 — 옆에서 오가는 대화가 작업을 움직이면 안 되기 때문이다.
 
 기본 유지 시간은 10시간이다. 사용자는 스레드에 한 줄 적어 언제든 바꿀 수 있다 —
-"연장 3시간", "마감 18:00", "닫기". 그런 줄은 감시자가 처리하고 세션을 깨우지
+"연장 3시간", "마감 18:00", "닫기". 그런 줄은 지킴이가 처리하고 세션을 깨우지
 않으므로, 내가 따로 할 일은 없다.
 
 설정이 없으면 조용히 아무것도 하지 않는다. 그것 때문에 작업을 멈추지 말 것.
@@ -67,7 +62,7 @@ keeper-start 를 다시 띄운 뒤 watch 를 다시 띄운다. 마감을 상시 
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.23.0",
+    version="0.24.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -113,25 +108,13 @@ def slack_notify(
         dest = chatmod._chat.channel if chatmod._chat else conf.channel
         thread = chatmod._chat.thread_ts if chatmod._chat else None
 
-    # 감시자가 없으면 답장이 바로 읽히지 않는다. 그 사실을 **폰에서** 알아야
-    # 한다 — 답을 적어놓고 읽히는 줄 아는 것이 제일 나쁘다.
-    unwatched = bool(thread) and not threads.watcher_alive(thread)
-    if unwatched:
-        body += "\n\n_지금은 감시 중이 아닙니다. 여기 답글을 달아도 바로 읽히지 않습니다._"
     try:
         res = slack.post_message(conf.bot_token, dest, body, thread_ts=thread)
     except slack.BodyRejected as e:
         return f"보내지 않았습니다 — {e}"
     except slack.SlackError as e:
         return f"보내지 못했습니다.\n{e}"
-    sent = f"보냈습니다 (ts={res.get('ts', '?')})"
-    if unwatched:
-        sent += (
-            "\n경고: 이 스레드를 지키는 감시자가 없습니다. 사용자가 답글을 달아도"
-            " 알아채지 못합니다.\n  → claude-slack-bridge watch --thread "
-            f"{thread} 를 백그라운드로 띄우세요."
-        )
-    return sent
+    return f"보냈습니다 (ts={res.get('ts', '?')})"
 
 
 @server.tool(
@@ -215,6 +198,20 @@ def _keeper_parent_arg() -> str:
     return fallback
 
 
+def _startup_lines(c: chatmod.Chat, parent_arg: str) -> str:
+    """지킴이와 세션 쪽 persistent Monitor 기동 안내."""
+    inbox = threads.THREADS_DIR / f"{c.thread_ts}.inbox.jsonl"
+    return (
+        "지킴이를 떼어내 띄우고, Claude Code Monitor 툴(persistent)로 inbox 를 tail 한다:\n"
+        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}"
+        "   (떼어냄 — Esc 에 안 죽음)\n"
+        f"  Monitor(persistent): tail -n 0 -F {inbox}\n"
+        "Monitor 는 파일만 보므로 기동 순서 제약과 NO_KEEPER 개념이 없다. "
+        "같은 Monitor 에서 keeper-start 출력의 pid 도 5초마다 확인하고, "
+        "사라지면 KEEPER_GONE 한 줄을 출력한다."
+    )
+
+
 @server.tool(
     name="slack_chat_open",
     title="폰과 대화 열기",
@@ -252,18 +249,14 @@ def slack_chat_open(
         c = chatmod.open_chat(conf.bot_token, target, hours, label, conf.owner_id)
     except slack.SlackError as e:
         return f"열지 못했습니다.\n{e}"
-    # thread ts 를 돌려주는 이유: 이 프로세스 밖에서 도는 감시자(watch)가
-    # 어느 스레드를 지켜볼지 알아야 한다. MCP 툴은 내가 부를 때만 도는 pull 이라
-    # 그것만으로는 작업 중에 오는 메시지를 알아채지 못한다.
+    # thread ts 와 inbox 절대경로를 돌려줘야 세션 쪽 Monitor 가 작업 중에 오는
+    # 메시지를 지속해서 받을 수 있다. MCP 툴은 내가 부를 때만 도는 pull 이다.
     where = "DM" if c.channel.startswith("D") else c.channel
     parent_arg = _keeper_parent_arg()
     return (
         f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "다음 둘을 반드시 이 순서대로 띄운다. 뒤집으면 watch가 NO_KEEPER로 즉시 끝난다:\n"
-        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}   (떼어냄 — Esc 에 안 죽음)\n"
-        f"  claude-slack-bridge watch --thread {c.thread_ts}   (백그라운드 — 나를 깨움)\n"
-        "감시자가 깨우면 답하기 전에 watch 를 먼저 다시 띄운다 — 답하는 동안 온 말도 곧바로 받는다."
+        f"{_startup_lines(c, parent_arg)}"
     )
 
 
@@ -307,7 +300,8 @@ def slack_wait_reply(timeout_seconds: int = 600) -> str:
     description=(
         "이미 있는 Slack 스레드에 이 세션을 묶는다. 세션이 재시작돼 자기가 열어둔 "
         "스레드로 돌아갈 때, 또는 다른 세션이 연 스레드를 이어받을 때 쓴다. "
-        "머리글을 새로 올리지 않으므로 폰에 같은 작업의 스레드가 쌓이지 않는다."
+        "머리글을 새로 올리지 않으므로 폰에 같은 작업의 스레드가 쌓이지 않는다. "
+        "label 을 바꾸면 기존 머리글을 갱신한다."
     ),
 )
 def slack_chat_attach(
@@ -342,10 +336,7 @@ def slack_chat_attach(
     return (
         f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        "다음 둘을 반드시 이 순서대로 띄우세요. 뒤집으면 watch가 NO_KEEPER로 즉시 끝납니다:\n"
-        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}\n"
-        f"  claude-slack-bridge watch --thread {c.thread_ts}\n"
-        "감시자가 깨우면 답하기 전에 watch 를 먼저 다시 띄운다 — 답하는 동안 온 말도 곧바로 받는다."
+        f"{_startup_lines(c, parent_arg)}"
     )
 
 
@@ -364,8 +355,8 @@ def slack_chat_list() -> str:
     for r in rows:
         ts = r.get("thread_ts", "?")
         until = _t.strftime("%H:%M", _t.localtime(float(r.get("deadline") or 0)))
-        watched = "감시중" if threads.watcher_alive(ts) else "감시없음"
-        out.append(f"{ts}  마감 {until}  {watched}  {r.get('label', '')}")
+        keeping = "지킴이중" if threads.inbox_keeper_alive(ts) else "지킴이없음"
+        out.append(f"{ts}  마감 {until}  {keeping}  {r.get('label', '')}")
     return "\n".join(out)
 
 @server.tool(
@@ -398,8 +389,8 @@ def slack_chat_close() -> str:
     if thread_ts:
         return (
             "닫았습니다. 머리글에 취소선을 그었습니다.\n"
-            "돌고 있는 감시자가 있으면 함께 내려주세요 "
-            f"(watch --thread {thread_ts})."
+            "이 스레드를 tail 하는 Monitor 가 있으면 TaskStop 으로 내려주세요 "
+            f"(thread {thread_ts})."
         )
     return "닫았습니다."
 

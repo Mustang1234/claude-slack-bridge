@@ -44,7 +44,7 @@ claude mcp add claude-slack-bridge -s user -- \
 | `token-help` | Bot User OAuth Token 받는 법 출력 |
 | `targets` | 보낼 수 있는 곳(기본 DM · 봇이 들어간 채널) 확인 |
 | `keeper-start --thread <ts>` | 지킴이를 떼어내 띄운다 |
-| `watch --thread <ts>` | 답글이 오면 종료해 세션을 깨운다 |
+| `watch --thread <ts>` | tmux·Claude 밖에서 쓰는 폴백 감시자 |
 | `doctor` | 현재 설정이 살아있는지 점검 |
 
 `init` 은 준비가 안 된 사람에게 **절차부터 안내한다.** uvx 로 설치하면 레포가 없어서
@@ -77,7 +77,7 @@ claude-slack-bridge manifest --name "내 비서"
 | `slack_check` | 토큰·채널·봇 초대 상태를 확인한다 |
 | `slack_chat_open` | 스레드를 열어 이 세션에 묶는다 (기본 10시간) |
 | `slack_chat_attach` | **이미 있는 스레드**에 붙는다 (재시작 후 복귀·다른 세션 인계) |
-| `slack_chat_list` | 열려 있는 스레드와 지킴이·감시자 상태 |
+| `slack_chat_list` | 열려 있는 스레드와 지킴이 상태 |
 | `slack_wait_reply` | 답글이 올 때까지 기다렸다 돌려준다 |
 | `slack_chat_extend` | 마감을 미룬다 |
 | `slack_chat_close` | 스레드를 닫는다 (머리글에 취소선) |
@@ -92,27 +92,28 @@ ntfy 로 같은 것을 하던 시절에는 토픽 여덟 개를 미리 만들어
 토픽명이 곧 비밀번호였기 때문이다. 스레드는 개수 제한이 없어 미리 만들 것도 반납할
 것도 없고, 닫아도 지우지 않고 머리글에 취소선만 남긴다.
 
-## 프로세스가 둘인 이유
+## 지킴이와 Monitor
 
-한 프로세스가 "지키기" 와 "깨우기" 를 겸할 수 없다.
+Slack을 읽는 지킴이와 세션을 깨우는 Monitor가 역할을 나눈다.
 
 | | 소유 | 사용자가 Esc | 하는 일 |
 |---|---|---|---|
 | **지킴이** `keeper-start` | 떼어냄 | **안 죽음** | 마감·연장·`핑`·수신확인 |
-| **감시자** `watch` | 에이전트 | 죽음 | 세션을 깨우는 것만 |
+| **Monitor** (persistent) | Claude Code | **안 죽음** | inbox 새 줄마다 세션 깨움 |
 
-깨움 신호는 "에이전트가 맡긴 백그라운드 작업이 끝났다" 에서 나온다. 그래서 떼어낸
-프로세스는 깨울 수 없고, 에이전트가 들고 있는 프로세스는 Esc 에 같이 죽는다.
-지킴이는 세션 프로세스의 죽음을 확인하면 Slack 스레드도 바로 닫는다.
+`slack_chat_open`이나 `slack_chat_attach`가 돌려주는 안내대로 지킴이를 띄우고, inbox
+절대경로를 Claude Code Monitor 툴(persistent)에서 `tail -n 0 -F` 한다. Monitor는
+stdout 한 줄마다 세션을 깨우며 이벤트마다 끝나지 않는다. 지킴이 pid도 함께 감시해
+사라지면 `KEEPER_GONE`을 출력하게 한다. 파일을 보는 일이므로 keeper-start와 Monitor의
+기동 순서에는 제약이 없고 `NO_KEEPER` 개념도 없다.
 
-감시자가 죽어도 **메시지를 잃지는 않는다.** 어디까지 읽었는지가 파일에 남아 다음
-감시자가 이어받는다. 잃는 것은 즉시성뿐이다.
+지킴이는 Slack 답장을 append-only inbox에 먼저 저장하므로 Monitor가 잠시 내려가도
+**메시지를 잃지는 않는다.** 세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack
+스레드도 닫는다.
 
-감시자는 깨우고 나면 끝나므로, 에이전트는 **답을 짓기 전에 먼저 다시 띄운다.** 답한
-뒤에 띄우면 답을 짓는 동안 감시자가 없어서, 그 사이에 온 말은 답이 끝나야 도착한다 —
-터미널에 연달아 던지듯 Slack 에 연달아 던졌을 때 두 번째가 늦는 것이 이 때문이다.
-한 번 깨어날 때 밀린 말은 한꺼번에 온다. 감시자가 커서 뒤의 것을 모두 출력하고
-끝내기 때문에, 여러 개를 던져도 순서대로 다 받는다.
+`watch --thread <ts>`는 삭제하지 않았다. Claude Code 세션에서는 보통 필요 없고,
+Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료해 깨움 신호를 만드는
+폴백이다.
 
 ## 폰에서 쓰는 명령
 
