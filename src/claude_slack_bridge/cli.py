@@ -585,7 +585,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     continue
                 note = (
                     "_받았습니다. 작업 중이라 답이 조금 늦어집니다._"
-                    if threads.watcher_alive(thread)
+                    if threads.session_listening(thread)
                     else "_받았습니다. 세션이 지금 듣고 있지 않아 답이 늦어질 수 있습니다._"
                 )
                 try:

@@ -291,3 +291,31 @@ def watcher_alive(thread_ts: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return "claude-slack-bridge" in out and "watch" in out
+
+
+def inbox_tailed(thread_ts: str) -> bool:
+    """inbox 를 열어 둔 리더(Monitor 의 tail 류)가 붙어 있는지.
+
+    Monitor 방식 수신자는 상태 파일에 아무것도 등록하지 않으므로 pid 로는
+    보이지 않는다. 등록을 요구하는 대신 파일을 열어 둔 프로세스의 존재로
+    듣는 중임을 판정한다. 지킴이 자신은 append 순간에만 잠깐 여니 자기
+    pid 는 제외한다.
+    """
+    path = _sidecar_path(thread_ts, ".inbox.jsonl")
+    if not path.exists():
+        return False
+    try:
+        proc = subprocess.run(
+            ["lsof", "-t", "--", str(path)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    pids.discard(str(os.getpid()))
+    return bool(pids)
+
+
+def session_listening(thread_ts: str) -> bool:
+    """세션 쪽 수신자가 듣고 있는지 — 폴백 watch 또는 inbox 를 tail 하는 Monitor."""
+    return watcher_alive(thread_ts) or inbox_tailed(thread_ts)
