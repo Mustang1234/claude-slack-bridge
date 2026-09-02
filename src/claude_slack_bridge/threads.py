@@ -126,11 +126,26 @@ def patch(thread_ts: str, **fields) -> dict:
         return data
 
 
-def append_inbox(thread_ts: str, msg: dict, summary: str) -> Path:
-    """지킴이가 받은 한 메시지를 append-only inbox 에 내구성 있게 남긴다."""
+def ensure_inbox(thread_ts: str) -> Path:
+    """inbox 파일을 미리 만들어 둔다(멱등).
+
+    수신자 판정(inbox_tailed)은 이 파일을 열어 둔 프로세스로 하는데, 파일이
+    없으면 tail -F 는 재시도만 하며 열지 않는다. 첫 답장이 오기 전까지 Monitor
+    가 멀쩡히 붙어 있어도 "수신자 없음" 으로 보이던 것이 그 때문이다. 경로를
+    세션에 넘기는 순간(open/attach)과 지킴이 기동 때 빈 파일로 만들어, 파일
+    부재가 판정에 섞이지 않게 한다.
+    """
     THREADS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(THREADS_DIR, stat.S_IRWXU)
     path = _sidecar_path(thread_ts, ".inbox.jsonl")
+    # 이미 있으면 내용을 건드리지 않는다 — append-only 기록이다.
+    os.close(os.open(path, os.O_RDONLY | os.O_CREAT, stat.S_IRUSR | stat.S_IWUSR))
+    return path
+
+
+def append_inbox(thread_ts: str, msg: dict, summary: str) -> Path:
+    """지킴이가 받은 한 메시지를 append-only inbox 에 내구성 있게 남긴다."""
+    path = ensure_inbox(thread_ts)
     record = {
         "ts": msg.get("ts", ""),
         "user": msg.get("user", ""),

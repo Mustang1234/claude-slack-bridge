@@ -225,7 +225,9 @@ def _keeper_parent_arg() -> str:
 
 def _startup_lines(c: chatmod.Chat, parent_arg: str) -> str:
     """지킴이와 세션 쪽 persistent Monitor 기동 안내."""
-    inbox = threads.THREADS_DIR / f"{c.thread_ts}.inbox.jsonl"
+    # 여기서 만들어 둬야 tail -F 가 곧바로 파일을 물고, 지킴이의 수신자 판정이
+    # 첫 답장 전까지 "수신자 없음" 으로 오탐하지 않는다.
+    inbox = threads.ensure_inbox(c.thread_ts)
     return (
         "지킴이를 떼어내 띄우고, Claude Code Monitor 툴(persistent)로 inbox 를 tail 한다:\n"
         f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}"

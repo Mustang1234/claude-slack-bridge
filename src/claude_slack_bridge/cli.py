@@ -764,6 +764,9 @@ def cmd_keeper_start(argv: list[str]) -> None:
 
     log = threads.THREADS_DIR / f"{thread}.keeper.log"
     threads.THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    # open/attach 를 거치지 않고 Monitor 가 지킴이만 되살린 경로에서도 inbox 가
+    # 있어야 수신자 판정이 파일 부재에 걸려 오탐하지 않는다.
+    threads.ensure_inbox(thread)
     with open(log, "ab") as fh:
         proc = subprocess.Popen(
             cmd, stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
