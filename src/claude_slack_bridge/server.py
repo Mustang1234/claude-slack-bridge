@@ -76,7 +76,7 @@ Monitor 는 Slack 이 아니라 파일만 보므로 keeper-start 와 기동 순�
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.25.0",
+    version="0.26.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -128,6 +128,17 @@ def slack_notify(
         return f"보내지 않았습니다 — {e}"
     except slack.SlackError as e:
         return f"보내지 못했습니다.\n{e}"
+
+    # 세션이 스레드에서 말한 시각을 남긴다. 지킴이는 이 값 하나로 "세션이
+    # 답했나" 를 판정한다 — 지킴이 자신도 스레드에 글을 쓰므로 봇 메시지의
+    # 존재만으로는 구분되지 않고, 지킴이 쪽 발화를 제외 목록으로 관리하면
+    # 나중에 발화가 하나 늘 때 탐지기가 조용히 깨진다. 세션의 말은 이 함수
+    # 하나를 지나가므로, 기록은 여기 한 곳이면 된다.
+    if thread:
+        try:
+            threads.patch(thread, session_reply_ts=float(res.get("ts") or 0))
+        except (OSError, ValueError):
+            pass   # 기록 실패로 알림 자체를 실패시키지 않는다
     return f"보냈습니다 (ts={res.get('ts', '?')})"
 
 

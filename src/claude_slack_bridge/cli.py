@@ -479,6 +479,7 @@ def cmd_keeper(argv: list[str]) -> None:
         owner_id = state.get("owner_id") or conf.owner_id
         seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
         pending: list[float] = []   # 수신확인을 보낼지 유예 중인 메시지들
+        health: dict = {}           # 세션 생존 판정의 확인 간격 캐시
         while True:
             if parent and not _pid_alive(int(parent)):
                 print("PARENT_GONE")
@@ -583,16 +584,21 @@ def cmd_keeper(argv: list[str]) -> None:
                 )
                 if answered:
                     continue
-                note = (
-                    "_받았습니다. 작업 중이라 답이 조금 늦어집니다._"
-                    if threads.session_listening(thread)
-                    else "_받았습니다. 세션이 지금 듣고 있지 않아 답이 늦어질 수 있습니다._"
-                )
+                # 진단은 여기서 하지 않는다. 왜 늦는지는 `_check_session_health`
+                # 가 더 정확하게 판정해 ⚠️ 로 알리므로, 여기서도 짐작을 보태면
+                # 같은 말이 10초·60초에 두 번 나가 소음이 된다. 겸해서 ACK 경로의
+                # `lsof` 호출도 사라진다 — 메시지가 몰릴 때 주기를 밀던 것이었다.
+                note = "_받았습니다. 적어 두었습니다._"
                 try:
                     slack.post_message(conf.bot_token, channel, note, thread_ts=thread)
                 except slack.SlackError:
                     still.append(ts)   # 못 보냈으면 다음 주기에 다시 시도
             pending = still
+
+            _check_session_health(
+                conf.bot_token, channel, thread, msgs,
+                bot_user_id, owner_id, require_mention, health,
+            )
 
             time.sleep(interval)
     finally:
@@ -601,6 +607,113 @@ def cmd_keeper(argv: list[str]) -> None:
         st = threads.load(thread) or {}
         if st.get("keeper_pid") == os.getpid():
             threads.patch(thread, keeper_pid=None, keeper_protocol=None)
+
+
+def _safe_patch(thread: str, **fields) -> bool:
+    """상태를 적되, 실패해도 지킴이를 죽이지 않는다.
+
+    지킴이가 죽으면 폰이 완전한 침묵이 되고 그때는 확인할 방법도 함께 사라진다
+    (같은 이유로 이 파일은 Slack 오류도 삼킨다). 생존 판정은 부가 기능이므로
+    디스크 오류 하나에 본체를 잃을 이유가 없다.
+    """
+    try:
+        threads.patch(thread, **fields)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _check_session_health(
+    token: str,
+    channel: str,
+    thread: str,
+    msgs: list[dict],
+    bot_user_id: str,
+    owner_id: str,
+    require_mention: bool,
+    cache: dict,
+) -> None:
+    """세션이 사용자의 말을 받고 있는지 보고, 아니면 폰에 드러낸다.
+
+    침묵은 "작업 중" 과 "죽었음" 이 똑같이 보이는 유일한 상태다. 그 구분을
+    사람의 의심에 맡기면, 실제로 끊긴 날에도 한참 뒤에야 알게 된다. 그래서
+    지킴이가 대신 판정해 한 번 알린다.
+
+    두 축으로 본다. 원인을 가리지 않는 것이 요점이다 — 지금 아는 고장 경로만
+    나열하면 아직 모르는 경로에서 또 조용히 끊긴다.
+
+      - 수신자 부재: inbox 를 tail 하는 Monitor 도, 폴백 watch 도 없다.
+        메시지가 오기 전에도 잡히므로 제일 이르다.
+      - 무응답: 수신자는 있는데 사용자의 말에 세션이 답을 못 하고 있다.
+        세션이 막혔거나, 죽었거나, 아직 모르는 무엇이거나 — 전부 여기 걸린다.
+
+    "세션이 답했나" 는 세션이 남긴 `session_reply_ts` 로만 판정한다. 봇 메시지의
+    존재로 보면 지킴이 자신의 발화(수신확인·마감 예고)가 답으로 오인된다.
+    """
+    now = time.time()
+    if now - float(cache.get("checked_at") or 0) < chat.LISTEN_CHECK:
+        return
+    cache["checked_at"] = now
+
+    state = threads.load(thread) or {}
+    reason = ""
+    if not threads.session_listening(thread):
+        reason = "수신자(Monitor)가 붙어 있지 않습니다"
+    else:
+        # 마감 조작 명령(`핑`·`연장 3시간`·`닫기`)은 지킴이가 처리하고 세션을
+        # 깨우지 않는다 — 세션이 조용한 것이 정상이다. 이것을 답 없는 말로 세면
+        # 생존을 확인하려고 `핑` 을 칠 때마다 5분 뒤 "죽었다" 가 날아온다.
+        mine = [
+            float(m.get("ts", 0)) for m in msgs
+            if chat.is_for_me(m, bot_user_id, owner_id, require_mention)
+            and not chat.parse_command(
+                chat.strip_mention(m.get("text", ""), bot_user_id)
+            )
+        ]
+        if mine:
+            last = max(mine)
+            replied = float(state.get("session_reply_ts") or 0)
+            if replied <= last and now - last >= chat.SILENCE_LEAD:
+                reason = f"마지막 말에 {chat.fmt_remaining(now - last)} 째 답이 없습니다"
+
+    down_since = float(state.get("down_since") or 0)
+    alerted = bool(state.get("down_alerted"))
+
+    if reason:
+        if not down_since:
+            # 처음 이상해진 순간만 적어둔다. 유예를 두는 것은 지킴이·Monitor 를
+            # 다시 띄우는 몇 초 사이에 경고가 나가지 않게 하기 위해서다.
+            _safe_patch(thread, down_since=now)
+            return
+        if alerted or now - down_since < chat.DOWN_GRACE:
+            return
+        # 표식을 먼저 남기고 보낸다. 보낸 뒤에 남기려다 그 사이에 죽으면, 새
+        # 지킴이가 이미 나간 ⚠️ 를 모른 채 ✅ 를 영영 안 보내거나 ⚠️ 를 또 보낸다.
+        # 표식을 못 남겼으면 아예 보내지 않는다 — 다음 주기에 다시 시도한다.
+        if not _safe_patch(thread, down_alerted=True):
+            return
+        try:
+            slack.post_message(token, channel, chat.down_text(reason), thread_ts=thread)
+        except slack.SlackError:
+            _safe_patch(thread, down_alerted=False)   # 못 보냈으니 표식을 되돌린다
+            return
+        print(f"SESSION_DOWN\t{reason}")
+        return
+
+    if not down_since:
+        return
+    if alerted:
+        # 경고를 보냈으면 끝도 반드시 보낸다. 안 그러면 복구된 것과 여전히
+        # 죽어 있는 것이 폰에서 구분되지 않는다. 여기서는 보낸 뒤에 지운다 —
+        # 못 보낸 채 지우면 ✅ 가 영영 사라지고, 반대는 한 번 더 보낼 뿐이다.
+        try:
+            slack.post_message(
+                token, channel, chat.back_text(now - down_since), thread_ts=thread
+            )
+        except slack.SlackError:
+            return
+        print("SESSION_BACK")
+    _safe_patch(thread, down_since=None, down_alerted=False)
 
 
 def _pid_alive(pid: int) -> bool:
