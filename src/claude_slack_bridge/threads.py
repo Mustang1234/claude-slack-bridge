@@ -352,6 +352,9 @@ def spawn_keeper(
         )
     time.sleep(1.5)
     if proc.poll() is not None:
+        state = load(thread_ts)
+        if state is not None and state.get("closed"):
+            return "THREAD_CLOSED", None
         return "DIED", None
     return "KEEPING", proc.pid
 
