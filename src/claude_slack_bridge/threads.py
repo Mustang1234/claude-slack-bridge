@@ -18,6 +18,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import time
 import warnings
 from contextlib import contextmanager
@@ -28,7 +29,10 @@ try:
 except ImportError:  # pragma: no cover - Windows 에는 없다.
     fcntl = None
 
-THREADS_DIR = Path(os.path.expanduser("~/.claude-slack-bridge/threads"))
+THREADS_DIR = Path(
+    os.environ.get("CLAUDE_SLACK_BRIDGE_THREADS_DIR")
+    or os.path.expanduser("~/.claude-slack-bridge/threads")
+)
 KEEPER_PROTOCOL = "inbox-v1"
 SIDECAR_SUFFIXES = (".inbox.jsonl", ".lock", ".keeper.log")
 
@@ -145,13 +149,23 @@ def ensure_inbox(thread_ts: str) -> Path:
 
 def append_inbox(thread_ts: str, msg: dict, summary: str) -> Path:
     """지킴이가 받은 한 메시지를 append-only inbox 에 내구성 있게 남긴다."""
-    path = ensure_inbox(thread_ts)
     record = {
         "ts": msg.get("ts", ""),
         "user": msg.get("user", ""),
         "text": msg.get("text", ""),
         "summary": summary,
     }
+    return _append_inbox_record(thread_ts, record)
+
+
+def append_inbox_event(thread_ts: str, event: str) -> Path:
+    """사용자 메시지가 아닌 수명주기 이벤트를 inbox 에 내구성 있게 남긴다."""
+    return _append_inbox_record(thread_ts, {"event": event, "ts": str(time.time())})
+
+
+def _append_inbox_record(thread_ts: str, record: dict) -> Path:
+    """완전한 JSON 한 줄을 append하고 디스크 반영까지 마친다."""
+    path = ensure_inbox(thread_ts)
     line = json.dumps(record, ensure_ascii=False) + "\n"
     # 쓰는 도중 강제종료되면 마지막 JSON 한 줄만 반쪽으로 남을 수 있다. 다음
     # 기록을 그대로 붙이면 둘이 한 줄이 되어 새 메시지까지 못 읽으므로, 끊긴 줄은
@@ -190,6 +204,8 @@ def read_inbox(thread_ts: str, after_ts: float) -> list[dict]:
         for line in fh:
             try:
                 record = json.loads(line)
+                if not isinstance(record, dict) or "event" in record:
+                    continue
                 record_ts = float(record.get("ts", 0)) if isinstance(record, dict) else 0
                 if record_ts <= after_ts or record_ts in seen:
                     continue
@@ -271,7 +287,8 @@ def _proc_is(pid, needle: str) -> bool:
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return False
-    return "claude-slack-bridge" in out and needle in out
+    bridge_process = "claude-slack-bridge" in out or "claude_slack_bridge" in out
+    return bridge_process and needle in out
 
 
 def keeper_alive(thread_ts: str) -> bool:
@@ -286,6 +303,57 @@ def inbox_keeper_alive(thread_ts: str) -> bool:
         state.get("keeper_protocol") == KEEPER_PROTOCOL
         and _proc_is(state.get("keeper_pid"), "keeper")
     )
+
+
+def spawn_keeper(
+    thread_ts: str,
+    parent_pid: int | None,
+    interval: float | None = None,
+) -> tuple[str, int | None]:
+    """durable inbox 지킴이를 판정하고 필요할 때 떼어내 띄운다.
+
+    기동 명령과 _proc_is 의 ps 명령줄 판정이 어긋나면 지킴이가 무한 중복된다.
+    """
+    state = load(thread_ts)
+    if state is None:
+        raise ValueError(f"이 스레드의 기록이 없습니다: {thread_ts}")
+    if state.get("closed"):
+        return "THREAD_CLOSED", None
+    if inbox_keeper_alive(thread_ts):
+        return "ALREADY_KEEPING", state.get("keeper_pid")
+    if keeper_alive(thread_ts):
+        return "STALE_KEEPER", state.get("keeper_pid")
+
+    # MCP 서버의 argv[0]은 uvx나 다른 래퍼일 수 있으므로 같은 venv의 console
+    # script를 찾는다. 없을 때만 -m으로 재진입하며 _proc_is는 양쪽 표기를 받는다.
+    console_script = Path(sys.executable).parent / "claude-slack-bridge"
+    if console_script.is_file():
+        cmd = [str(console_script), "keeper", "--thread", thread_ts]
+    else:
+        cmd = [sys.executable, "-m", "claude_slack_bridge", "keeper", "--thread", thread_ts]
+    if interval is not None:
+        cmd += ["--interval", str(interval)]
+    if parent_pid is not None:
+        cmd += ["--parent-pid", str(parent_pid)]
+
+    log = _sidecar_path(thread_ts, ".keeper.log")
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_inbox(thread_ts)
+    child_env = os.environ.copy()
+    child_env["CLAUDE_SLACK_BRIDGE_THREADS_DIR"] = str(THREADS_DIR)
+    with open(log, "ab") as fh:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=fh,
+            stderr=fh,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
+            start_new_session=True,
+        )
+    time.sleep(1.5)
+    if proc.poll() is not None:
+        return "DIED", None
+    return "KEEPING", proc.pid
 
 
 def watcher_alive(thread_ts: str) -> bool:

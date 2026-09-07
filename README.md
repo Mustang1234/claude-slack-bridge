@@ -57,7 +57,7 @@ claude mcp add claude-slack-bridge -s user -- \
 | `manifest` | Slack 콘솔에 붙여넣을 앱 매니페스트 출력 (`--name` 으로 봇 이름 변경) |
 | `token-help` | Bot User OAuth Token 받는 법 출력 |
 | `targets` | 보낼 수 있는 곳(기본 DM · 봇이 들어간 채널) 확인 |
-| `keeper-start --thread <ts>` | 지킴이를 떼어내 띄운다 |
+| `keeper-start --thread <ts>` | 지킴이 수동 기동·진단 (보통은 MCP 서버가 자동 기동) |
 | `watch --thread <ts>` | tmux·Claude 밖에서 쓰는 폴백 감시자 |
 | `doctor` | 현재 설정이 살아있는지 점검 |
 
@@ -112,18 +112,31 @@ Slack을 읽는 지킴이와 세션을 깨우는 Monitor가 역할을 나눈다.
 
 | | 소유 | 사용자가 Esc | 하는 일 |
 |---|---|---|---|
-| **지킴이** `keeper-start` | 떼어냄 | **안 죽음** | 마감·연장·`핑`·수신확인 |
+| **지킴이** | MCP 서버가 기동, 프로세스는 떼어냄 | **안 죽음** | 마감·연장·`핑`·수신확인 |
 | **Monitor** (persistent) | Claude Code | **안 죽음** | inbox 새 줄마다 세션 깨움 |
 
-`slack_chat_open`이나 `slack_chat_attach`가 돌려주는 안내대로 지킴이를 띄우고, inbox
-절대경로를 Claude Code Monitor 툴(persistent)에서 `tail -n 0 -F` 한다. Monitor는
-stdout 한 줄마다 세션을 깨우며 이벤트마다 끝나지 않는다. 지킴이 pid도 함께 감시해
-사라지면 `KEEPER_GONE`을 출력하게 한다. 파일을 보는 일이므로 keeper-start와 Monitor의
-기동 순서에는 제약이 없고 `NO_KEEPER` 개념도 없다.
+`slack_chat_open`이나 `slack_chat_attach`가 지킴이를 직접 띄우고, MCP 서버 안의 감시
+스레드가 30초마다 죽었는지 확인해 되살린다. 세션이 작성할 셸 로직은 없다. 반환된 inbox
+절대경로를 Claude Code Monitor 툴(persistent)에서 아래 한 줄로 tail 하면 된다.
+
+```bash
+tail -n 0 -F /절대경로/<thread-ts>.inbox.jsonl
+```
+
+Monitor는 stdout 한 줄마다 세션을 깨우며 이벤트마다 끝나지 않는다. 스레드가 닫히면
+inbox에 `{"event": "THREAD_CLOSED"}`가 기록되므로 그때 Monitor를 내린다.
 
 지킴이는 Slack 답장을 append-only inbox에 먼저 저장하므로 Monitor가 잠시 내려가도
 **메시지를 잃지는 않는다.** 세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack
 스레드도 닫는다.
+
+서버가 재시작되면 메모리의 소유 스레드 목록은 비지만, 떼어낸 지킴이는 살아남는다.
+서버는 재시작 뒤 열린 스레드를 자동 재발견하지 않는다. 지킴이까지 사라졌다면
+`slack_chat_attach`로 다시 붙을 때 소유 목록에 재등록하고 즉시 기동한다. 서버와
+지킴이가 함께 없는 동안에는 되살리기와 자동 마감이 멈춘다는 한계가 있다. 마감 시각은
+상태에 남으므로 attach 뒤 되살아난 지킴이가 이미 지난 마감을 바로 처리한다.
+지킴이의 부모는 최초 spawn한 세션으로 고정되므로, 두 세션이 같은 스레드에 붙어 있어도
+최초 세션이 끝나면 다른 세션의 수신 여부와 무관하게 스레드를 닫는다.
 
 `watch --thread <ts>`는 삭제하지 않았다. Claude Code 세션에서는 보통 필요 없고,
 Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료해 깨움 신호를 만드는

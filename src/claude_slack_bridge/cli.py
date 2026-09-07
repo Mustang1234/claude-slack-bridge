@@ -485,6 +485,7 @@ def cmd_keeper(argv: list[str]) -> None:
                 print("PARENT_GONE")
                 current = threads.load(thread) or state
                 if current.get("closed"):
+                    threads.append_inbox_event(thread, "THREAD_CLOSED")
                     return
                 last_seen = float(current.get("last_seen_ts") or 0)
                 unread = threads.read_inbox(thread, last_seen)
@@ -495,11 +496,13 @@ def cmd_keeper(argv: list[str]) -> None:
                     conf.bot_token, channel, thread, label, reason,
                 ):
                     print("PARENT_CLOSE_FAILED")
+                threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
 
             state = threads.load(thread) or state
             if state.get("closed"):
                 print("CLOSED")
+                threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
             deadline = float(state.get("deadline") or 0)
             remaining = deadline - time.time()
@@ -507,6 +510,7 @@ def cmd_keeper(argv: list[str]) -> None:
             if remaining <= 0:
                 chat.close_thread(conf.bot_token, channel, thread, label, "마감 시각 도달")
                 print("DEADLINE_CLOSED")
+                threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
 
             if not state.get("warned") and remaining <= chat.WARN_LEAD:
@@ -542,6 +546,7 @@ def cmd_keeper(argv: list[str]) -> None:
                         cmd[0], cmd[1], threads.load(thread) or state,
                     ):
                         print("CLOSED_BY_USER")
+                        threads.append_inbox_event(thread, "THREAD_CLOSED")
                         return
                     seen = message_ts
                     threads.patch(thread, keeper_seen_ts=seen)
@@ -743,40 +748,18 @@ def cmd_keeper_start(argv: list[str]) -> None:
     if not thread:
         _die("--thread <스레드 ts> 가 필요합니다.")
 
-    if threads.inbox_keeper_alive(thread):
-        print(f"ALREADY_KEEPING\t{(threads.load(thread) or {}).get('keeper_pid')}")
-        return
-    if threads.keeper_alive(thread):
-        stale_pid = (threads.load(thread) or {}).get("keeper_pid")
-        print(f"STALE_KEEPER\t{stale_pid}")
+    parent_arg = _arg(argv, "--parent-pid")
+    interval_arg = _arg(argv, "--interval")
+    status, pid = threads.spawn_keeper(
+        thread,
+        parent_pid=int(parent_arg) if parent_arg is not None else None,
+        interval=float(interval_arg) if interval_arg is not None else None,
+    )
+    print(f"{status}\t{pid}")
+    if status == "STALE_KEEPER":
         print("기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요.")
-        return
-
-    cmd = [sys.argv[0], "keeper", "--thread", thread]
-    for flag in ("--interval", "--parent-pid"):
-        val = _arg(argv, flag)
-        if val:
-            cmd += [flag, val]
-    # 부모를 자동으로 잡지 않는다. keeper-start 를 감싼 셸·uvx 는 곧바로
-    # 사라지므로 그것을 부모로 삼으면 지킴이가 즉시 PARENT_GONE 으로 끝난다.
-    # 세션 pid 를 아는 호출자만 --parent-pid 로 명시한다. 없으면 마감까지 산다 —
-    # 마감이 있으므로 영원히 남지는 않는다.
-
-    log = threads.THREADS_DIR / f"{thread}.keeper.log"
-    threads.THREADS_DIR.mkdir(parents=True, exist_ok=True)
-    # open/attach 를 거치지 않고 Monitor 가 지킴이만 되살린 경로에서도 inbox 가
-    # 있어야 수신자 판정이 파일 부재에 걸려 오탐하지 않는다.
-    threads.ensure_inbox(thread)
-    with open(log, "ab") as fh:
-        proc = subprocess.Popen(
-            cmd, stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    # 기동 직후 죽는 경우(설정 없음 등)를 바로 드러낸다.
-    time.sleep(1.5)
-    if proc.poll() is not None:
-        _die(f"지킴이가 바로 종료됐습니다. 로그: {log}")
-    print(f"KEEPING\t{proc.pid}")
+    if status in ("THREAD_CLOSED", "DIED"):
+        raise SystemExit(1)
 
 
 def cmd_targets(argv: list[str]) -> None:
@@ -838,8 +821,8 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
                                  보통 Monitor 로 inbox 를 tail 하므로 필요 없으며,
                                  tmux·Claude 밖 환경을 위한 폴백이다
   claude-slack-bridge keeper-start --thread <ts>
-                                 지킴이를 떼어내 띄운다. 마감·연장·핑을 지키며
-                                 Esc 에 죽지 않는다 (깨우지는 않는다)
+                                 지킴이를 수동 기동·진단한다. 보통은 MCP 서버가
+                                 자동으로 띄우고 되살린다
   claude-slack-bridge targets    보낼 수 있는 곳(기본 DM · 초대된 채널)을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
