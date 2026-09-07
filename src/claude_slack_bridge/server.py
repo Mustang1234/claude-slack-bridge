@@ -70,7 +70,7 @@ INSTRUCTIONS = """\
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.27.1",
+    version="0.27.2",
     instructions=INSTRUCTIONS,
 )
 
@@ -218,6 +218,8 @@ def _session_pid() -> int:
 
 _OWNED: set[str] = set()
 _OWNED_LOCK = threading.Lock()
+# open/attach와 되살리기 틱의 동시 spawn으로 지킴이가 중복되는 것을 막는다.
+_SPAWN_LOCK = threading.Lock()
 _KEEPER_TICK = threading.Event()
 _KEEPER_THREAD_STARTED = False
 
@@ -243,7 +245,9 @@ def _keeper_loop() -> None:
                     continue
                 if threads.keeper_alive(thread_ts):
                     continue
-                status, _ = threads.spawn_keeper(thread_ts, parent_pid=_session_pid())
+                parent_pid = _session_pid()
+                with _SPAWN_LOCK:
+                    status, _ = threads.spawn_keeper(thread_ts, parent_pid=parent_pid)
                 if status == "THREAD_CLOSED":
                     _forget_owned(thread_ts)
                 elif status == "DIED":
@@ -269,7 +273,9 @@ def _own(thread_ts: str) -> None:
 def _start_keeper(thread_ts: str) -> str:
     """open/attach 결과에 넣을 지킴이 상태를 만든다."""
     try:
-        status, pid = threads.spawn_keeper(thread_ts, parent_pid=_session_pid())
+        parent_pid = _session_pid()
+        with _SPAWN_LOCK:
+            status, pid = threads.spawn_keeper(thread_ts, parent_pid=parent_pid)
         if status == "STALE_KEEPER":
             result = f"지킴이: STALE_KEEPER pid={pid} — 옛 지킴이를 끝내야 합니다"
         elif pid is not None:
