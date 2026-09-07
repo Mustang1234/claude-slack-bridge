@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import threading
 
 from mcp.server.mcpserver import MCPServer
 
@@ -43,25 +45,17 @@ INSTRUCTIONS = """\
 세션마다 스레드가 하나씩 생기는데 폰에서는 전부 같은 봇 이름으로 보이므로,
 그 라벨이 어느 작업인지 가릴 유일한 단서다.
 
-대화를 열었으면 지킴이를 띄우고, Claude Code 의 Monitor 툴(persistent)로 툴이
-돌려주는 inbox 절대경로를 `tail -n 0 -F` 한다.
-
-  - `keeper-start` — 지킴이를 떼어내 띄운다. Slack 답장을 파일에 받아 적고,
-    마감·연장·"핑" 을 지킨다. Esc 를 눌러도 죽지 않는다.
-  - Monitor — persistent 로 inbox 를 계속 tail 한다. stdout 한 줄마다 나를 깨우며,
-    Esc 에도 살아남고 세션 종료·TaskStop 때만 내려간다. 같은 Monitor 에서 지킴이
-    pid 도 확인해, 사라지면 `KEEPER_GONE` 한 줄을 출력하게 한다.
-
-Monitor 는 Slack 이 아니라 파일만 보므로 keeper-start 와 기동 순서 제약이 없고
-`NO_KEEPER` 개념도 없다. `KEEPER_GONE` 이 나오면 keeper-start 를 다시 띄운다.
-마감을 상시 지키는 쪽은 지킴이 하나뿐이라, 죽은 채 두면 마감이 지나도 스레드가
-닫히지 않는다. Monitor 가 내려가 있어도 지킴이가 답장을 파일에 남기므로 다시 tail
-할 수 있다. 잃는 것은 즉시성뿐이다.
+대화를 열면 서버가 지킴이를 띄우고 되살린다. Claude Code 의 Monitor 툴(persistent)은
+툴이 돌려주는 inbox 절대경로를 `tail -n 0 -F` 하는 한 줄만 실행한다. stdout 한 줄마다
+세션을 깨우며, `{"event": "THREAD_CLOSED"}` 줄이 오면 Monitor 를 내린다. Monitor 가
+잠시 내려가도 지킴이가 답장을 파일에 남기므로 잃는 것은 즉시성뿐이다.
 세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack 스레드도 닫는다.
 
 세션이 재시작됐거나 다른 세션이 연 스레드를 이어받을 때는 `slack_chat_open` 이
 아니라 `slack_chat_attach` 를 쓴다. 새로 열면 폰에 같은 작업의 스레드가 쌓인다.
 붙을 대상은 `slack_chat_list` 로 찾는다.
+지킴이의 부모는 최초 spawn한 세션으로 고정되므로, 두 세션이 붙어 있어도 최초 세션이
+끝나면 다른 세션의 수신 여부와 무관하게 스레드를 닫는다.
 
 스레드는 기본적으로 사용자와의 DM 에 열린다. 팀이 같이 봐야 하는 일이면
 `channel="#이름"` 으로 지정한다. 채널에서는 봇을 @멘션한 소유자의 답글만 지시로
@@ -76,7 +70,7 @@ Monitor 는 Slack 이 아니라 파일만 보므로 keeper-start 와 기동 순�
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.26.0",
+    version="0.27.1",
     instructions=INSTRUCTIONS,
 )
 
@@ -178,18 +172,17 @@ def _bot_user_id(token: str) -> str:
 _BOT_ID = ""
 
 
-def _keeper_parent_arg() -> str:
+def _session_pid() -> int:
     self_pid = os.getpid()
-    fallback = f" --parent-pid {self_pid}"
     try:
         result = subprocess.run(
             ["ps", "-Ao", "pid=,ppid=,command="],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError, UnicodeError):
-        return fallback
+        return self_pid
     if result.returncode != 0:
-        return fallback
+        return self_pid
 
     processes = {}
     for line in result.stdout.splitlines():
@@ -213,29 +206,93 @@ def _keeper_parent_arg() -> str:
         parent, command = process
         executable = command.lstrip().split(None, 1)[0]
         if os.path.basename(executable) == "claude":
-            return f" --parent-pid {pid}"
+            return pid
         if parent <= 1 or parent == pid:
             break
         pid = parent
 
     # 세션을 못 찾았을 때 중간 래퍼를 찍으면 래퍼만 먼저 죽어 대화를 조기에
     # 닫을 수 있다. 세션과 함께 죽는 MCP 서버 자신이 더 안전한 대리다.
-    return fallback
+    return self_pid
 
 
-def _startup_lines(c: chatmod.Chat, parent_arg: str) -> str:
-    """지킴이와 세션 쪽 persistent Monitor 기동 안내."""
+_OWNED: set[str] = set()
+_OWNED_LOCK = threading.Lock()
+_KEEPER_TICK = threading.Event()
+_KEEPER_THREAD_STARTED = False
+
+
+def _forget_owned(thread_ts: str) -> None:
+    with _OWNED_LOCK:
+        _OWNED.discard(thread_ts)
+
+
+def _keeper_loop() -> None:
+    """이 서버가 연 스레드의 지킴이를 로컬 판정만으로 되살린다."""
+    while True:
+        _KEEPER_TICK.wait(30)
+        with _OWNED_LOCK:
+            owned = tuple(_OWNED)
+        for thread_ts in owned:
+            try:
+                state = threads.load(thread_ts)
+                if state is None or state.get("closed"):
+                    _forget_owned(thread_ts)
+                    continue
+                if threads.inbox_keeper_alive(thread_ts):
+                    continue
+                if threads.keeper_alive(thread_ts):
+                    continue
+                status, _ = threads.spawn_keeper(thread_ts, parent_pid=_session_pid())
+                if status == "THREAD_CLOSED":
+                    _forget_owned(thread_ts)
+                elif status == "DIED":
+                    print(f"keeper revive failed ({thread_ts}): DIED", file=sys.stderr)
+            except Exception as e:
+                print(f"keeper revive failed ({thread_ts}): {e}", file=sys.stderr)
+
+
+def _own(thread_ts: str) -> None:
+    global _KEEPER_THREAD_STARTED
+    with _OWNED_LOCK:
+        _OWNED.add(thread_ts)
+        if _KEEPER_THREAD_STARTED:
+            return
+        _KEEPER_THREAD_STARTED = True
+        threading.Thread(
+            target=_keeper_loop,
+            name="claude-slack-bridge-keeper",
+            daemon=True,
+        ).start()
+
+
+def _start_keeper(thread_ts: str) -> str:
+    """open/attach 결과에 넣을 지킴이 상태를 만든다."""
+    try:
+        status, pid = threads.spawn_keeper(thread_ts, parent_pid=_session_pid())
+        if status == "STALE_KEEPER":
+            result = f"지킴이: STALE_KEEPER pid={pid} — 옛 지킴이를 끝내야 합니다"
+        elif pid is not None:
+            result = f"지킴이: {status} pid={pid}"
+        else:
+            result = f"지킴이: {status}"
+    except Exception as e:
+        result = f"지킴이: 시작 실패 — {e}"
+    _own(thread_ts)
+    return result
+
+
+def _startup_lines(c: chatmod.Chat, keeper_status: str) -> str:
+    """세션 쪽 persistent Monitor 의 단순 tail 안내."""
     # 여기서 만들어 둬야 tail -F 가 곧바로 파일을 물고, 지킴이의 수신자 판정이
     # 첫 답장 전까지 "수신자 없음" 으로 오탐하지 않는다.
     inbox = threads.ensure_inbox(c.thread_ts)
     return (
-        "지킴이를 떼어내 띄우고, Claude Code Monitor 툴(persistent)로 inbox 를 tail 한다:\n"
-        f"  claude-slack-bridge keeper-start --thread {c.thread_ts}{parent_arg}"
-        "   (떼어냄 — Esc 에 안 죽음)\n"
-        f"  Monitor(persistent): tail -n 0 -F {inbox}\n"
-        "Monitor 는 파일만 보므로 기동 순서 제약과 NO_KEEPER 개념이 없다. "
-        "같은 Monitor 에서 keeper-start 출력의 pid 도 5초마다 확인하고, "
-        "사라지면 KEEPER_GONE 한 줄을 출력한다."
+        f"{keeper_status}\n"
+        "Claude Code Monitor 툴(persistent)로 이 한 줄만 실행한다:\n"
+        f"  tail -n 0 -F {inbox}\n"
+        "지킴이 기동과 되살리기는 서버가 한다. 스레드가 닫히면 inbox 에 "
+        '{"event": "THREAD_CLOSED"} 줄이 오니 그때 Monitor 를 내린다.'
     )
 
 
@@ -279,11 +336,11 @@ def slack_chat_open(
     # thread ts 와 inbox 절대경로를 돌려줘야 세션 쪽 Monitor 가 작업 중에 오는
     # 메시지를 지속해서 받을 수 있다. MCP 툴은 내가 부를 때만 도는 pull 이다.
     where = "DM" if c.channel.startswith("D") else c.channel
-    parent_arg = _keeper_parent_arg()
+    keeper_status = _start_keeper(c.thread_ts)
     return (
         f"열렸습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        f"{_startup_lines(c, parent_arg)}"
+        f"{_startup_lines(c, keeper_status)}"
     )
 
 
@@ -359,11 +416,11 @@ def slack_chat_attach(
         return f"붙지 못했습니다.\n{e}"
 
     where = "DM" if c.channel.startswith("D") else c.channel
-    parent_arg = _keeper_parent_arg()
+    keeper_status = _start_keeper(c.thread_ts)
     return (
         f"붙었습니다({where}). 마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.\n"
         f"thread={c.thread_ts}\n"
-        f"{_startup_lines(c, parent_arg)}"
+        f"{_startup_lines(c, keeper_status)}"
     )
 
 
@@ -414,6 +471,7 @@ def slack_chat_close() -> str:
     thread_ts = chatmod._chat.thread_ts if chatmod._chat else None
     chatmod.close_chat(conf.bot_token)
     if thread_ts:
+        _forget_owned(thread_ts)
         return (
             "닫았습니다. 머리글에 취소선을 그었습니다.\n"
             "이 스레드를 tail 하는 Monitor 가 있으면 TaskStop 으로 내려주세요 "
