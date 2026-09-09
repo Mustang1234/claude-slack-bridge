@@ -31,14 +31,21 @@ uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-b
 "승인 요청됨" 안내가 뜨면 승인 전까지 토큰이 나오지 않는다. 요청 사유에는 아래 정도면
 충분하다.
 
-> 개발 작업 알림을 지정한 비공개 채널로 받기 위한 봇. 외부로 데이터를 보내지 않고,
+> 개발 작업 알림을 지정한 채널이나 봇과의 DM으로 받기 위한 봇. 외부로 데이터를 보내지 않고,
 > 초대된 채널에만 접근한다.
 
-## 2. 받을 곳 만들기 (Slack 앱)
+## 2. 멤버 ID와 받을 곳 준비하기 (Slack 앱)
 
-1. Slack 에서 비공개 채널을 하나 만든다 (예: `#claude-알림`)
+먼저 본인 프로필 → 더보기(⋮) → `멤버 ID 복사`로 `U`로 시작하는 내 멤버 ID를 얻는다.
+이 값은 목적지 종류와 무관하게 필수다.
+
+목적지는 공개 채널·비공개 채널·봇과의 DM 중 하나다. 채널을 쓸 때는:
+
+1. 받을 공개 또는 비공개 채널을 고르거나 만든다 (예: `#claude-알림`)
 2. 그 채널에서 `/invite @Claude Bridge` 로 봇을 초대한다
 3. 채널 이름 우클릭 → `링크 복사` → URL 끝의 `C` 로 시작하는 문자열이 채널 ID 다
+
+채널에 앱을 추가할 권한이 없으면 봇과의 DM을 고른다. DM에는 초대나 채널 ID가 필요 없다.
 
 봇을 초대하지 않으면 메시지가 **에러 없이 조용히** 가지 않는다. 압도적인 1위 실패
 원인이라 `init` 이 이 항목을 따로 검사한다.
@@ -49,9 +56,10 @@ uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-b
 claude-slack-bridge init
 ```
 
-토큰(입력이 화면에 표시되지 않는다) → 채널 ID 순으로 물어보고, 토큰 유효성 → 봇 초대
-여부 → 테스트 메시지 발송까지 확인한 뒤 `~/.claude-slack-bridge/config.json` 에 권한
-600 으로 저장한다. 폰에 테스트 메시지가 뜨면 성공이다.
+토큰(입력이 화면에 표시되지 않는다) → 내 멤버 ID → 공개 채널·비공개 채널·DM 목적지
+순으로 물어본다. 토큰 유효성과 채널을 골랐을 때의 봇 초대 여부를 확인하고 테스트 메시지를
+보낸 뒤 `~/.claude-slack-bridge/config.json` 에 권한 600 으로 저장한다. 폰에 테스트 메시지가
+뜨면 성공이다.
 
 손으로 만들고 싶으면 이렇게 해도 된다.
 
@@ -60,13 +68,14 @@ mkdir -p ~/.claude-slack-bridge
 cat > ~/.claude-slack-bridge/config.json <<'JSON'
 {
   "bot_token": "xoxb-...",
-  "channel": "C..."
+  "channel": "C...",
+  "owner_id": "U..."
 }
 JSON
 chmod 600 ~/.claude-slack-bridge/config.json
 ```
 
-환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` 이 있으면 그쪽이 우선한다.
+환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` / `SLACK_OWNER_ID` 가 있으면 그쪽이 우선한다.
 
 이미 설정한 뒤 상태를 확인하려면 `claude-slack-bridge doctor` 를 쓴다.
 
