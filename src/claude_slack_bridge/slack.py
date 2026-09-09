@@ -147,6 +147,42 @@ def post_message(token: str, channel: str, text: str, thread_ts: str | None = No
     return api(token, "chat.postMessage", payload)
 
 
+# 에이전트 세션 상태. 앱 매니페스트에 `features.agent_view` 가 있어야 부를 수 있다.
+# 실측 2026-09-09:
+#   - `processing` 이면 스레드 안에 "<앱 이름> 앱이 작업 중…" 이 흐르는 표시로 뜬다.
+#     메시지가 아니라 알림이 가지 않고, 이력에도 남지 않는다.
+#   - `suspended` 는 아무것도 그리지 않는다(화면상 `active` 와 같다). 의미만 다르다.
+#   - 세션을 만드는 첫 호출에 `initiator_user_id` 가 없으면 이후 어떤 상태를 찍어도
+#     아무에게도 보이지 않는다. 상태를 보여줄 상대가 없는 세션이 되기 때문이다.
+#   - 이벤트 구독(Socket Mode) 없이 Web API 만으로 되고, 무료 플랜에서도 됐다.
+#     정지 버튼만은 `agent_session_stopped` 구독이 있어야 떠서 여기서는 빠진다.
+SESSION_STATUSES = ("active", "processing", "suspended", "closed")
+
+
+def set_session_status(
+    token: str, channel: str, thread_ts: str, status: str,
+    initiator_user_id: str = "", title: str = "",
+) -> bool:
+    """스레드의 에이전트 세션 상태를 찍는다. 실패는 False 로 돌려주고 올리지 않는다.
+
+    agent_view 없이 설치된 앱은 `not_authorized` 로 떨어지는데, 그 앱에서도 브리지의
+    나머지는 그대로 돌아야 한다. 부르는 쪽은 False 를 받으면 옛 경로(텍스트
+    수신확인)로 간다. 네트워크 오류도 같은 취급이다 — 상태 표시 하나 때문에
+    지킴이가 죽어서는 안 된다.
+    """
+    assert status in SESSION_STATUSES, status
+    payload = {"channel_id": channel, "thread_ts": thread_ts, "status": status}
+    if initiator_user_id:
+        payload["initiator_user_id"] = initiator_user_id
+    if title:
+        payload["title"] = title[:200]
+    try:
+        api(token, "agents.sessions.setStatus", payload, form=True)
+    except SlackError:
+        return False
+    return True
+
+
 def chat_update(token: str, channel: str, ts: str, text: str) -> dict:
     """이미 보낸 내 메시지를 고쳐 쓴다.
 

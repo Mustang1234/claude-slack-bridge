@@ -338,6 +338,7 @@ def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: s
         # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
         # 있는 쪽이 나쁘다.
         notified = False
+    slack.set_session_status(token, channel, thread_ts, "closed")
     threads.patch(thread_ts, closed=True, closed_at=time.time(), reason=reason)
     return notified
 
