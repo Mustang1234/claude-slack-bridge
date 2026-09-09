@@ -119,7 +119,7 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="0.30.0",
+    version="1.0.0",
     instructions=INSTRUCTIONS,
 )
 
