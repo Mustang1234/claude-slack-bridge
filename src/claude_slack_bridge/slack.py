@@ -120,11 +120,28 @@ def auth_test(token: str) -> dict:
     return api(token, "auth.test", {})
 
 
+# 발신자 표시 이름·아이콘. 봇 유저의 프로필 이름은 처음 설치 때 워크스페이스에 굳어져
+# App Home 에서 바꿔도 재설치로는 안 바뀐다(실측 2026-09-09). 대신 메시지마다 username /
+# icon 을 실으면 그 이름으로 보인다 — 앱에 `chat:write.customize` 스코프가 있어야 하고,
+# 없으면 Slack 이 조용히 무시한다. 값은 config.load() 가 채운다.
+_identity: dict = {}
+
+
+def set_identity(display_name: str = "", icon_emoji: str = "", icon_url: str = "") -> None:
+    _identity.clear()
+    if display_name:
+        _identity["username"] = display_name
+    if icon_emoji:
+        _identity["icon_emoji"] = icon_emoji
+    elif icon_url:
+        _identity["icon_url"] = icon_url
+
+
 def post_message(token: str, channel: str, text: str, thread_ts: str | None = None) -> dict:
     scrub_check(text)
     if len(text) > BODY_MAX:
         text = text[: BODY_MAX - 20] + "\n… (잘림)"
-    payload: dict = {"channel": channel, "text": text}
+    payload: dict = {"channel": channel, "text": text, **_identity}
     if thread_ts:
         payload["thread_ts"] = thread_ts
     return api(token, "chat.postMessage", payload)

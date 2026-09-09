@@ -24,6 +24,9 @@ class Config:
     bot_token: str
     channel: str
     owner_id: str = ""      # 채널에서 내 지시로 인정할 사람. 비면 제한 없음.
+    display_name: str = ""  # 메시지 발신자 이름 덮어쓰기(chat:write.customize 필요). 비면 봇 프로필 이름.
+    icon_emoji: str = ""    # 발신자 아이콘 — ":robot_face:" 꼴. icon_url 보다 우선.
+    icon_url: str = ""      # 발신자 아이콘 이미지 URL(https). 비면 앱 아이콘.
 
     @property
     def masked_token(self) -> str:
@@ -45,13 +48,30 @@ def load() -> Config | None:
         token = token or str(raw.get("bot_token", "")).strip()
         channel = channel or str(raw.get("channel", "")).strip()
         owner = str(raw.get("owner_id", "")).strip()
+        display_name = str(raw.get("display_name", "")).strip()
+        icon_emoji = str(raw.get("icon_emoji", "")).strip()
+        icon_url = str(raw.get("icon_url", "")).strip()
     else:
-        owner = ""
+        owner = display_name = icon_emoji = icon_url = ""
     owner = os.environ.get("SLACK_OWNER_ID", owner).strip()
+    display_name = os.environ.get("SLACK_DISPLAY_NAME", display_name).strip()
+    icon_emoji = os.environ.get("SLACK_ICON_EMOJI", icon_emoji).strip()
+    icon_url = os.environ.get("SLACK_ICON_URL", icon_url).strip()
 
     if not token or not channel:
         return None
-    return Config(bot_token=token, channel=channel, owner_id=owner)
+    # 발신 정체는 전역 상태 — post_message 호출부 11곳이 토큰만 넘기므로 여기서 한 번 심는다.
+    from . import slack
+
+    slack.set_identity(display_name, icon_emoji, icon_url)
+    return Config(
+        bot_token=token,
+        channel=channel,
+        owner_id=owner,
+        display_name=display_name,
+        icon_emoji=icon_emoji,
+        icon_url=icon_url,
+    )
 
 
 def save(token: str, channel: str, owner_id: str = "") -> Path:

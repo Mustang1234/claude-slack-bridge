@@ -179,6 +179,25 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` 이 있으면 그쪽이 우선한다.
 설정이 없으면 조용히 아무것도 하지 않으므로, 설치만 해두고 나중에 설정해도 된다.
 
+### 발신자 이름·아이콘
+
+봇 유저의 프로필 이름은 처음 설치할 때 워크스페이스에 굳어진다. App Home 에서 바꾸고
+재설치해도 이미 설치된 워크스페이스에는 반영되지 않는다. 그래서 메시지마다 이름을
+실어 보내는 쪽을 쓴다 — 앱의 Bot Token Scopes 에 **`chat:write.customize`** 를 추가하고
+재설치(토큰은 그대로)한 뒤 설정에 적는다.
+
+```json
+{
+  "display_name": "KHJ's Claude Code",
+  "icon_emoji": ":robot_face:"
+}
+```
+
+`icon_url` 로 이미지 URL 을 줄 수도 있다(`icon_emoji` 가 있으면 그쪽이 우선). 둘 다
+비우면 앱 아이콘(Basic Information → App Icon)이 쓰인다. 환경변수는
+`SLACK_DISPLAY_NAME` / `SLACK_ICON_EMOJI` / `SLACK_ICON_URL`. 스코프가 없으면 Slack 이
+값을 조용히 무시하고 봇 프로필 이름으로 나간다.
+
 ## 나가는 본문 규칙
 
 비밀값(개인키 블록, URL 에 박힌 인증정보, Slack/GitHub/AWS 토큰)이 섞이면 **보내지
