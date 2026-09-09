@@ -305,6 +305,21 @@ def inbox_keeper_alive(thread_ts: str) -> bool:
     )
 
 
+def keeper_command(thread_ts: str, *, subcommand: str = "keeper") -> list[str]:
+    """같은 venv의 브리지 CLI로 지킴이 명령을 만드는 공용 규칙."""
+    if subcommand not in ("keeper", "keeper-start"):
+        raise ValueError(f"지원하지 않는 지킴이 명령입니다: {subcommand}")
+    # MCP 서버의 argv[0]은 uvx나 다른 래퍼일 수 있으므로 같은 venv의 console
+    # script를 찾는다. 없을 때만 -m으로 재진입하며 _proc_is는 양쪽 표기를 받는다.
+    executable = Path(os.path.abspath(sys.executable))
+    console_script = executable.parent / "claude-slack-bridge"
+    if console_script.is_file():
+        return [str(console_script), subcommand, "--thread", thread_ts]
+    return [
+        str(executable), "-m", "claude_slack_bridge", subcommand, "--thread", thread_ts,
+    ]
+
+
 def spawn_keeper(
     thread_ts: str,
     parent_pid: int | None,
@@ -324,13 +339,7 @@ def spawn_keeper(
     if keeper_alive(thread_ts):
         return "STALE_KEEPER", state.get("keeper_pid")
 
-    # MCP 서버의 argv[0]은 uvx나 다른 래퍼일 수 있으므로 같은 venv의 console
-    # script를 찾는다. 없을 때만 -m으로 재진입하며 _proc_is는 양쪽 표기를 받는다.
-    console_script = Path(sys.executable).parent / "claude-slack-bridge"
-    if console_script.is_file():
-        cmd = [str(console_script), "keeper", "--thread", thread_ts]
-    else:
-        cmd = [sys.executable, "-m", "claude_slack_bridge", "keeper", "--thread", thread_ts]
+    cmd = keeper_command(thread_ts)
     if interval is not None:
         cmd += ["--interval", str(interval)]
     if parent_pid is not None:
