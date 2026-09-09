@@ -104,16 +104,16 @@ def step1() -> str:
 STEP2 = """\
 ━━ 3단계 · 알림을 받을 곳 정하기 (Slack 앱) ━━
 
-  1) 비공개 채널을 하나 만든다 (예: claude-알림)
-  2) 그 채널에서  /invite @Claude Bridge  를 실행해 봇을 초대한다
-  3) 채널명 우클릭 → 링크 복사 → URL 끝의 C 로 시작하는 문자열이 채널 ID
+  공개 또는 비공개 채널:
+  1) 받을 채널에서  /invite @Claude Bridge  를 실행해 봇을 초대한다
+  2) 채널명 우클릭 → 링크 복사 → URL 끝의 C 로 시작하는 문자열이 채널 ID
 
-  * 2번을 빠뜨리는 것이 압도적인 1위 실패 원인이다. 초대하지 않으면 메시지가
+  * 1번을 빠뜨리는 것이 압도적인 1위 실패 원인이다. 초대하지 않으면 메시지가
     에러 없이 조용히 전달만 안 된다. 그래서 아래에서 초대 여부를 검사한다.
 
   * /invite 가 "수행할 수 없습니다" 로 거부되면 워크스페이스가 앱 추가를 관리자로
     제한한 것이다. 그때는 채널을 포기하고 봇과의 DM 으로 받으면 된다 — DM 은
-    채널 멤버십이 아니라서 초대라는 절차가 없다. 아래에서 2) 를 고르면 된다.
+    채널 멤버십이 아니라서 초대라는 절차가 없다. 아래에서 3) 을 고르면 된다.
 """
 
 
@@ -180,9 +180,9 @@ def cmd_manifest(argv: list[str]) -> None:
 
 def cmd_init(argv: list[str]) -> None:
     """설정을 만들고, 실제로 메시지가 도달하는지까지 확인한다."""
-    print("Slack 설정을 만듭니다. 준비물은 봇 토큰과 채널 ID 둘입니다.\n")
+    print("Slack 설정을 만듭니다. 준비물은 봇 토큰과 내 멤버 ID, 받을 곳입니다.\n")
 
-    ready = input("이미 토큰과 채널 ID 가 있습니까? [y/N] ").strip().lower()
+    ready = input("이미 토큰과 멤버 ID, 받을 곳 정보가 있습니까? [y/N] ").strip().lower()
     if ready not in ("y", "yes"):
         print()
         print(step1())
@@ -220,23 +220,25 @@ def cmd_init(argv: list[str]) -> None:
     print(f"  워크스페이스: {who.get('team')}")
     print(f"  봇 이름: {who.get('user')}\n")
 
-    print("알림을 받을 곳을 고릅니다.")
-    print("  1) 비공개 채널 — 봇을 초대해야 한다")
-    print("  2) 봇과의 DM   — 초대가 필요 없다 (채널에 앱을 못 넣는 경우)")
-    where = input("[1/2] ").strip()
+    print("  Slack 에서 본인 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
+    owner_id = input("내 멤버 ID (U 로 시작): ").strip()
+    if not owner_id:
+        _die("멤버 ID 가 비었습니다.")
+    print()
 
-    owner_id = ""
-    if where == "2":
-        print()
-        print("  Slack 에서 본인 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
-        user_id = input("내 멤버 ID (U 로 시작): ").strip()
-        if not user_id:
-            _die("멤버 ID 가 비었습니다.")
+    print("알림을 받을 곳을 고릅니다.")
+    print("  1) 공개 채널   — 봇을 초대해야 한다")
+    print("  2) 비공개 채널 — 봇을 초대해야 한다")
+    print("  3) 봇과의 DM   — 초대가 필요 없다 (채널에 앱을 못 넣는 경우)")
+    where = input("[1/2/3] ").strip()
+    if where not in ("1", "2", "3"):
+        _die("1, 2, 3 중 하나를 골라주세요.")
+
+    if where == "3":
         try:
-            channel = slack.conversations_open(token, user_id)
+            channel = slack.conversations_open(token, owner_id)
         except slack.SlackError as e:
             _die(f"DM 을 열지 못했습니다.\n{e}")
-        owner_id = user_id
         print(f"  DM 대화: {channel}\n")
     else:
         channel = input("채널 ID (C 로 시작): ").strip()
@@ -253,21 +255,20 @@ def cmd_init(argv: list[str]) -> None:
             )
 
         print(f"  채널: #{info.get('name')}")
+        if where == "1" and info.get("is_private"):
+            print("  안내: 이건 비공개 채널입니다. 그대로 진행합니다.")
+        if where == "2" and not info.get("is_private"):
+            print("  안내: 이건 공개 채널입니다. 그대로 진행합니다.")
         if not info.get("is_member"):
             _die(
                 "  봇이 이 채널에 없습니다.\n\n"
                 f"  → Slack 의 #{info.get('name')} 에서 다음을 실행한 뒤 다시 시도하세요.\n"
                 f"       /invite @{who.get('user')}\n\n"
                 "  이 명령이 '수행할 수 없습니다' 로 거부되면 워크스페이스가 앱 추가를\n"
-                "  관리자로 제한한 것입니다. 그때는 init 을 다시 돌려 2) DM 을 고르세요."
+                "  관리자로 제한한 것입니다. 그때는 init 을 다시 돌려 3) DM 을 고르세요."
             )
         print("  봇 초대됨: 예\n")
-        # 채널에서는 아무나 세션에 지시할 수 없어야 한다. 누구의 멘션을 내 말로
-        # 받을지 여기서 정해둔다. 비워두면 제한 없이 받는다.
-        print("  채널에서는 봇을 @멘션한 지정된 사람의 답글만 지시로 받습니다.")
-        print("  Slack 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
-        owner_id = input("  내 멤버 ID (U 로 시작, 비우면 제한 없음): ").strip()
-        print()
+        print("  채널에서는 소유자와 소유자가 끼운 사람의 @멘션만 지시로 받습니다.\n")
 
     try:
         slack.post_message(token, channel, "연결됐습니다. 이제 여기로 알림이 옵니다.")
@@ -301,9 +302,47 @@ def _keep_awake() -> "subprocess.Popen | None":
         return None
 
 
-def _apply_command(token, channel, thread, label, kind, value, state) -> bool:
-    """폰에서 온 마감 조작 명령을 처리한다. 닫혔으면 True."""
+def _apply_command(token, channel, thread, label, kind, value, state, actor_id="") -> bool:
+    """폰에서 온 지킴이 명령을 처리한다. 닫혔으면 True."""
     now = time.time()
+    if not channel.startswith("D") and actor_id != state.get("owner_id"):
+        # 채널에서는 listener 도 수신 필터를 통과하므로, 지킴이 명령(핑·연장·
+        # 마감·닫기·듣기)은 여기서 주인만 남긴다. 예전에는 필터가 주인만 통과시켜
+        # 이 게이트가 필요 없었다. DM 은 상대가 한 사람이라 거를 것이 없다.
+        try:
+            slack.post_message(token, channel, "주인만 할 수 있습니다.", thread_ts=thread)
+        except slack.SlackError:
+            pass
+        return False
+
+    if kind in ("listen", "unlisten", "listeners"):
+        if channel.startswith("D"):
+            reply = "DM 에서는 쓸 수 없습니다."
+        else:
+            current = cfg.channel_listeners(channel)
+            if kind == "listen":
+                current.extend(user_id for user_id in value if user_id not in current)
+                cfg.save_channel_listeners(channel, current)
+                reply = (
+                    "이 채널에서 이제 "
+                    + " ".join(f"<@{user_id}>" for user_id in value)
+                    + " 의 말도 듣습니다."
+                )
+            elif kind == "unlisten":
+                current = [user_id for user_id in current if user_id not in value]
+                cfg.save_channel_listeners(channel, current)
+                reply = " ".join(f"<@{user_id}>" for user_id in value) + " 는 이제 듣지 않습니다."
+            elif current:
+                people = ", ".join(f"<@{user_id}>" for user_id in current)
+                reply = f"이 채널에서 듣는 사람: <@{state['owner_id']}>(주인), {people}"
+            else:
+                reply = "이 채널에서 듣는 사람: 주인만"
+        try:
+            slack.post_message(token, channel, reply, thread_ts=thread)
+        except slack.SlackError:
+            pass
+        return False
+
     if kind == "ping":
         # 감시자가 살아있는지 사용자가 직접 확인하는 길.
         #
@@ -519,6 +558,21 @@ def cmd_keeper(argv: list[str]) -> None:
                 print("CLOSED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
+            owner_id = state.get("owner_id") or conf.owner_id
+            # channels.json은 작고 listener 변경은 드물다. 캐시 무효화 복잡성을
+            # 들이지 않고 매 폴링에 읽어 모든 열린 스레드에 즉시 반영한다.
+            listeners = cfg.channel_listeners(channel)
+            if require_mention and not owner_id and not state.get("owner_missing_warned"):
+                if _safe_patch(thread, owner_missing_warned=True):
+                    try:
+                        slack.post_message(
+                            conf.bot_token, channel,
+                            "owner 가 설정돼 있지 않아 이 채널에서는 지시를 받지 않습니다. "
+                            "`claude-slack-bridge init` 을 다시 돌려 주세요",
+                            thread_ts=thread,
+                        )
+                    except slack.SlackError:
+                        _safe_patch(thread, owner_missing_warned=False)
             deadline = float(state.get("deadline") or 0)
             remaining = deadline - time.time()
 
@@ -548,7 +602,7 @@ def cmd_keeper(argv: list[str]) -> None:
             fresh = [
                 m for m in msgs
                 if float(m.get("ts", 0)) > seen
-                and chat.is_for_me(m, bot_user_id, owner_id, require_mention)
+                and chat.is_for_me(m, bot_user_id, owner_id, require_mention, listeners)
             ]
             fresh.sort(key=lambda m: float(m.get("ts", 0)))
 
@@ -556,9 +610,12 @@ def cmd_keeper(argv: list[str]) -> None:
                 message_ts = float(m.get("ts", 0))
                 cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
                 if cmd:
+                    command_state = threads.load(thread) or state
+                    command_state.setdefault("owner_id", owner_id)
                     if _apply_command(
                         conf.bot_token, channel, thread, label,
-                        cmd[0], cmd[1], threads.load(thread) or state,
+                        cmd[0], cmd[1], command_state,
+                        str(m.get("user") or ""),
                     ):
                         print("CLOSED_BY_USER")
                         threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -618,8 +675,8 @@ def cmd_keeper(argv: list[str]) -> None:
 
             if expired_unanswered:
                 note = (
-                    "_받았습니다. 세션이 작업 중입니다 — 결과가 나오면 답합니다._"
-                    if agent_session else "_받았습니다. 적어 두었습니다._"
+                    "_네, 봤습니다. 지금 하던 걸 마저 보고 있어요. 정리되는 대로 답드릴게요._"
+                    if agent_session else "_네, 봤습니다. 적어 뒀어요._"
                 )
                 try:
                     slack.post_message(conf.bot_token, channel, note, thread_ts=thread)
@@ -636,7 +693,7 @@ def cmd_keeper(argv: list[str]) -> None:
 
             _check_session_health(
                 conf.bot_token, channel, thread, msgs,
-                bot_user_id, owner_id, require_mention, health,
+                bot_user_id, owner_id, require_mention, listeners, health,
             )
 
             time.sleep(interval)
@@ -670,6 +727,7 @@ def _check_session_health(
     bot_user_id: str,
     owner_id: str,
     require_mention: bool,
+    listeners: list[str],
     cache: dict,
 ) -> None:
     """세션이 사용자의 말을 받고 있는지 보고, 아니면 폰에 드러낸다.
@@ -699,12 +757,14 @@ def _check_session_health(
     if not threads.session_listening(thread):
         reason = "수신자(Monitor)가 붙어 있지 않습니다"
     else:
-        # 마감 조작 명령(`핑`·`연장 3시간`·`닫기`)은 지킴이가 처리하고 세션을
+        # 지킴이 명령(`핑`·`연장`·`닫기`·listener 관리)은 세션을
         # 깨우지 않는다 — 세션이 조용한 것이 정상이다. 이것을 답 없는 말로 세면
         # 생존을 확인하려고 `핑` 을 칠 때마다 5분 뒤 "죽었다" 가 날아온다.
         mine = [
             float(m.get("ts", 0)) for m in msgs
-            if chat.is_for_me(m, bot_user_id, owner_id, require_mention)
+            if chat.is_for_me(
+                m, bot_user_id, owner_id, require_mention, listeners,
+            )
             and not chat.parse_command(
                 chat.strip_mention(m.get("text", ""), bot_user_id)
             )
@@ -815,7 +875,9 @@ def cmd_targets(argv: list[str]) -> None:
         _die("설정이 없습니다.")
     print(f"기본값: {conf.channel}" + ("  (봇과의 DM)" if conf.channel.startswith("D") else ""))
     if conf.owner_id:
-        print(f"소유자: {conf.owner_id}  (채널에서는 이 사람의 멘션만 지시로 받음)")
+        print(f"소유자: {conf.owner_id}  (채널에서는 소유자와 listeners의 멘션만 지시로 받음)")
+    elif not conf.channel.startswith("D"):
+        print("경고: owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
     convs = slack.my_conversations(conf.bot_token)
     if not convs:
         print("\n봇이 들어가 있는 채널이 없습니다.")
@@ -845,6 +907,14 @@ def cmd_doctor(argv: list[str]) -> None:
     print(f"워크스페이스: {who.get('team')}")
     print(f"봇: {who.get('user')}")
     print(f"받는 곳: {target['label']}")
+    if target["kind"] == "channel" and not conf.owner_id:
+        print("경고: owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
+    if target["kind"] == "channel":
+        channels, channels_error = cfg.load_channels_with_error()
+        if channels_error:
+            print(f"경고: {channels_error} — listener 없이 진행합니다.")
+        listeners = channels.get(conf.channel, {}).get("listeners") or []
+        print("listeners: " + (", ".join(listeners) if listeners else "0"))
     if target["kind"] == "channel" and not target["ready"]:
         _die(f"봇이 채널에 없습니다.\n  → /invite @{who.get('user')}")
     print("\n정상입니다.")
@@ -866,7 +936,7 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge keeper-start --thread <ts>
                                  지킴이를 수동 기동·진단한다. 보통은 MCP 서버가
                                  자동으로 띄우고 되살린다
-  claude-slack-bridge targets    보낼 수 있는 곳(기본 DM · 초대된 채널)을 본다
+  claude-slack-bridge targets    설정한 기본 목적지와 초대된 채널을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
 

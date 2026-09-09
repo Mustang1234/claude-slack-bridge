@@ -183,7 +183,7 @@ def back_text(down_seconds: float) -> str:
 
 
 def parse_command(text: str):
-    """폰에서 보낸 한 줄이 마감 조작 명령인지 본다.
+    """폰에서 보낸 한 줄이 지킴이가 직접 처리할 명령인지 본다.
 
     자리를 비운 사람이 마감을 바꾸려고 터미널로 돌아와야 한다면 그건 바꿀 수
     없는 것이나 마찬가지다. 스레드에 한 줄 적는 것으로 되어야 한다.
@@ -198,7 +198,22 @@ def parse_command(text: str):
     if t in ("핑", "ping", "살아있어?", "살아있니?", "?"):
         return ("ping", None)
 
-    if t in ("닫기", "종료", "닫아", "그만"):
+    for kind, words in (("listen", ("듣기", "listen")), ("unlisten", ("그만", "unlisten"))):
+        m = re.fullmatch(rf"(?:{'|'.join(words)})\s+(.+)", t)
+        if not m:
+            continue
+        mentions = re.findall(r"<@(U[A-Z0-9]+)(?:\|[^>]+)?>", m.group(1))
+        remainder = re.sub(r"<@U[A-Z0-9]+(?:\|[^>]+)?>", "", m.group(1))
+        if mentions and not remainder.strip():
+            # 같은 사람을 두 번 적어도 상태에는 한 번만 남긴다.
+            return (kind, list(dict.fromkeys(mentions)))
+
+    if t in ("누구 듣니", "누구 들어", "listeners"):
+        return ("listeners", None)
+
+    # "그만" 은 닫기 별칭에서 뺐다. "그만 @사람" 이 listener 해제 명령이 되면서,
+    # 멘션을 빠뜨린 "그만" 한 마디가 스레드를 닫아 버리는 사고가 생기기 때문이다.
+    if t in ("닫기", "종료", "닫아"):
         return ("close", None)
 
     m = re.fullmatch(r"마감\s*(\d{1,2}):(\d{2})", t)
@@ -291,6 +306,7 @@ def open_chat(
         # 채널이면 멘션을 요구한다. DM 은 상대가 나뿐이라 필요 없다.
         "require_mention": not channel.startswith("D"),
         "owner_id": owner_id,
+        "owner_missing_warned": False,
     })
     return _chat
 
@@ -379,6 +395,7 @@ def is_for_me(
     bot_user_id: str,
     owner_id: str = "",
     require_mention: bool = False,
+    listeners: list[str] | None = None,
 ) -> bool:
     """이 메시지를 내 세션에 대한 지시로 받아들일지 판정한다.
 
@@ -388,17 +405,22 @@ def is_for_me(
     내 작업을 움직인다. 그래서 두 겹을 건다.
 
       - 봇을 @멘션한 것만 — 남이 봐도 "저건 봇한테 하는 말" 이 보인다
-      - 소유자가 쓴 것만 — 채널 멤버 아무나 세션에 명령할 수는 없다
+      - 소유자나 소유자가 끼운 listener가 쓴 것만 — 채널 멤버 아무나 세션에
+        명령할 수는 없다
 
-    소유자를 정해두지 않았으면 작성자 제한은 걸지 않는다. 설정이 없다는 이유로
-    조용히 아무 말도 안 듣는 상태가 되면, 고장과 구분되지 않는다.
+    채널인데 소유자가 없으면 아무 지시도 받지 않는다. 이 상태는 지킴이가
+    스레드에 한 번 경고해 고장과 구분되게 한다.
     """
     if not is_human(msg, bot_user_id):
         return False
-    if owner_id and msg.get("user") != owner_id:
-        return False
-    if require_mention and f"<@{bot_user_id}>" not in (msg.get("text") or ""):
-        return False
+    if require_mention:
+        if not owner_id:
+            return False
+        allowed = {owner_id, *(listeners or [])}
+        if msg.get("user") not in allowed:
+            return False
+        if f"<@{bot_user_id}>" not in (msg.get("text") or ""):
+            return False
     return True
 
 
