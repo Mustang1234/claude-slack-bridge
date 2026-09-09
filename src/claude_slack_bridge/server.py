@@ -133,6 +133,9 @@ def slack_notify(
             threads.patch(thread, session_reply_ts=float(res.get("ts") or 0))
         except (OSError, ValueError):
             pass   # 기록 실패로 알림 자체를 실패시키지 않는다
+        # 지킴이가 켠 "작업 중" 을 내린다. 세션이 답했으니 이제 다음 말을 기다리는
+        # 상태다. 새 API 는 앱 메시지에 자동으로 지워지는지 문서에 없어 명시로 찍는다.
+        slack.set_session_status(conf.bot_token, dest, thread, "active")
     return f"보냈습니다 (ts={res.get('ts', '?')})"
 
 

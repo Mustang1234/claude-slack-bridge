@@ -441,8 +441,9 @@ def cmd_keeper(argv: list[str]) -> None:
     둘을 겸할 수 없어서 역할을 나눈다.
 
     지킴이는 깨우지 않으므로 떼어내도 잃을 것이 없다. Esc 를 눌러도 살아남아
-    마감을 지키고, 사용자가 적은 "연장 3시간"·"핑" 에 답하고, 새 메시지에
-    "받았습니다" 를 남긴다. 세션이 죽으면 부모를 잃은 것을 보고 스스로 끝낸다.
+    마감을 지키고, 사용자가 적은 "연장 3시간"·"핑" 에 답하고, 새 메시지가 오면
+    "작업 중" 표시를 켠다(에이전트 세션이 없는 앱이면 "받았습니다" 를 남긴다).
+    세션이 죽으면 부모를 잃은 것을 보고 스스로 끝낸다.
 
     커서는 감시자와 따로 쓴다. 같은 값을 두 프로세스가 밀면 한쪽이 본 것을
     다른 쪽이 못 본 것으로 만든다.
@@ -478,7 +479,19 @@ def cmd_keeper(argv: list[str]) -> None:
         require_mention = bool(state.get("require_mention"))
         owner_id = state.get("owner_id") or conf.owner_id
         seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
-        pending: list[float] = []   # 수신확인을 보낼지 유예 중인 메시지들
+        # 에이전트 세션을 여기서 만든다. 열기·붙기·되살리기 어느 경로든 지킴이는
+        # 반드시 뜨므로 한 곳이면 된다. initiator 를 붙이는 것이 핵심이다 — 없으면
+        # 세션은 만들어지는데 상태를 보여줄 상대가 없어 아무것도 안 그려진다.
+        # 그래서 initiator 로 쓸 사람을 모르면(owner_id 미설정) 지금 만들지 않고,
+        # 첫 말이 왔을 때 그 발신자로 만든다. 실패(agent_view 없는 앱)는 False 로
+        # 남겨 이 지킴이는 텍스트 수신확인으로 돈다.
+        agent_session: bool | None = None
+        if owner_id:
+            agent_session = slack.set_session_status(
+                conf.bot_token, channel, thread, "active",
+                initiator_user_id=owner_id, title=label,
+            )
+        pending: list[float] = []   # 텍스트 수신확인을 보낼지 유예 중인 메시지들
         health: dict = {}           # 세션 생존 판정의 확인 간격 캐시
         while True:
             if parent and not _pid_alive(int(parent)):
@@ -574,9 +587,20 @@ def cmd_keeper(argv: list[str]) -> None:
                     except slack.SlackError:
                         pass
 
-                # 지금 답하지 않고 적어둔다. 대부분은 몇 초 안에 진짜 답이
-                # 붙으므로, 그때 "받았습니다" 는 소음일 뿐이다.
-                pending.append(message_ts)
+                # 받았다는 표시는 "작업 중" 상태로 한다. 메시지가 아니라 소음이
+                # 없으므로 유예 없이 바로 켠다. 세션이 답하면(server.slack_notify)
+                # 거기서 active 로 내린다. 상태를 못 찍는 앱이면 옛 경로 — 유예 뒤
+                # 답이 없을 때만 텍스트로 "받았습니다" 를 남긴다.
+                if agent_session is None and m.get("user"):
+                    agent_session = slack.set_session_status(
+                        conf.bot_token, channel, thread, "active",
+                        initiator_user_id=str(m["user"]), title=label,
+                    )
+                if not (
+                    agent_session
+                    and slack.set_session_status(conf.bot_token, channel, thread, "processing")
+                ):
+                    pending.append(message_ts)
 
             # 유예가 지난 것 중 아직 답이 안 붙은 것만 알린다.
             still = []
@@ -702,6 +726,9 @@ def _check_session_health(
         except slack.SlackError:
             _safe_patch(thread, down_alerted=False)   # 못 보냈으니 표식을 되돌린다
             return
+        # "작업 중" 이 켜진 채 ⚠️ 가 나가면 표시가 거짓말이 된다. suspended 는
+        # 아무것도 그리지 않지만 상태만은 사실과 맞춘다.
+        slack.set_session_status(token, channel, thread, "suspended")
         print(f"SESSION_DOWN\t{reason}")
         return
 
@@ -717,6 +744,7 @@ def _check_session_health(
             )
         except slack.SlackError:
             return
+        slack.set_session_status(token, channel, thread, "active")
         print("SESSION_BACK")
     _safe_patch(thread, down_since=None, down_alerted=False)
 

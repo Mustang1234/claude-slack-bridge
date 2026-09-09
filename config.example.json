@@ -1,4 +1,6 @@
 {
   "bot_token": "xoxb-여기에-봇-토큰",
-  "channel": "C여기에-채널ID"
+  "channel": "C여기에-채널ID",
+  "display_name": "",
+  "icon_emoji": ""
 }
