@@ -25,9 +25,9 @@ from . import threads
 
 MANIFEST_NAME = "slack-app-manifest.yaml"
 
-# 받자마자 알리지 않고 이만큼 기다린다. 그 사이 진짜 답이 붙으면 알리지 않는다 —
-# 매번 붙는 "받았습니다" 는 정보가 아니라 소음이다.
-ACK_DELAY = 10.0
+# 작업 중 표시가 이보다 오래 남지 않게 한다. 그 사이 세션 답이 없으면 지킴이가
+# 대신 받았다고 알리고 표시를 내린다.
+ACK_DELAY = 30.0
 
 
 def _die(msg: str) -> None:
@@ -314,7 +314,8 @@ def _apply_command(token, channel, thread, label, kind, value, state) -> bool:
         try:
             slack.post_message(
                 token, channel,
-                f"_살아 있습니다. 마감 {until} "
+                f"_지킴이가 살아 있습니다. Claude 세션 수신 여부는 별도 ⚠️ 경고로 알립니다. "
+                f"마감 {until} "
                 f"({chat.fmt_remaining(float(state.get('deadline') or now) - now)} 남음)._",
                 thread_ts=thread,
             )
@@ -442,7 +443,8 @@ def cmd_keeper(argv: list[str]) -> None:
 
     지킴이는 깨우지 않으므로 떼어내도 잃을 것이 없다. Esc 를 눌러도 살아남아
     마감을 지키고, 사용자가 적은 "연장 3시간"·"핑" 에 답하고, 새 메시지가 오면
-    "작업 중" 표시를 켠다(에이전트 세션이 없는 앱이면 "받았습니다" 를 남긴다).
+    "작업 중" 표시를 켜고, 30초 안에 세션 답이 없으면 지킴이가 대신
+    "받았습니다" 를 남긴 뒤 표시를 내린다.
     세션이 죽으면 부모를 잃은 것을 보고 스스로 끝낸다.
 
     커서는 감시자와 따로 쓴다. 같은 값을 두 프로세스가 밀면 한쪽이 본 것을
@@ -587,41 +589,49 @@ def cmd_keeper(argv: list[str]) -> None:
                     except slack.SlackError:
                         pass
 
-                # 받았다는 표시는 "작업 중" 상태로 한다. 메시지가 아니라 소음이
-                # 없으므로 유예 없이 바로 켠다. 세션이 답하면(server.slack_notify)
-                # 거기서 active 로 내린다. 상태를 못 찍는 앱이면 옛 경로 — 유예 뒤
-                # 답이 없을 때만 텍스트로 "받았습니다" 를 남긴다.
+                # 받았다는 표시는 "작업 중" 상태로 즉시 켠다. 세션이 답하면
+                # server.slack_notify가 active로 내린다. 30초까지 답이 없으면
+                # agent_view 앱에도 지킴이가 대체 답글을 남기고 표시를 내리며,
+                # 상태를 못 찍는 옛 앱은 기존의 짧은 수신확인을 남긴다.
                 if agent_session is None and m.get("user"):
                     agent_session = slack.set_session_status(
                         conf.bot_token, channel, thread, "active",
                         initiator_user_id=str(m["user"]), title=label,
                     )
-                if not (
-                    agent_session
-                    and slack.set_session_status(conf.bot_token, channel, thread, "processing")
-                ):
-                    pending.append(message_ts)
+                if agent_session:
+                    slack.set_session_status(conf.bot_token, channel, thread, "processing")
+                # 상태 표시 지원 여부와 무관하게 30초 뒤 실제 세션 답을 확인한다.
+                # 지원 앱도 그때까지 답이 없으면 지킴이가 대신 답하고 표시를 내린다.
+                pending.append(message_ts)
 
             # 유예가 지난 것 중 아직 답이 안 붙은 것만 알린다.
             still = []
+            expired_unanswered = []
+            replied = float((threads.load(thread) or {}).get("session_reply_ts") or 0)
             for ts in pending:
                 if time.time() - ts < ACK_DELAY:
                     still.append(ts)
                     continue
-                answered = any(
-                    m.get("bot_id") and float(m.get("ts", 0)) > ts for m in msgs
-                )
-                if answered:
+                if replied > ts:
                     continue
-                # 진단은 여기서 하지 않는다. 왜 늦는지는 `_check_session_health`
-                # 가 더 정확하게 판정해 ⚠️ 로 알리므로, 여기서도 짐작을 보태면
-                # 같은 말이 10초·60초에 두 번 나가 소음이 된다. 겸해서 ACK 경로의
-                # `lsof` 호출도 사라진다 — 메시지가 몰릴 때 주기를 밀던 것이었다.
-                note = "_받았습니다. 적어 두었습니다._"
+                expired_unanswered.append(ts)
+
+            if expired_unanswered:
+                note = (
+                    "_받았습니다. 세션이 작업 중입니다 — 결과가 나오면 답합니다._"
+                    if agent_session else "_받았습니다. 적어 두었습니다._"
+                )
                 try:
                     slack.post_message(conf.bot_token, channel, note, thread_ts=thread)
                 except slack.SlackError:
-                    still.append(ts)   # 못 보냈으면 다음 주기에 다시 시도
+                    still.extend(expired_unanswered)  # 못 보냈으면 다음 주기에 다시 시도
+                else:
+                    # 이 글은 지킴이 발화라 session_reply_ts를 건드리지 않는다.
+                    # 5분 무응답 판정은 계속 살아 있고, 작업 중 표시는 여기서 내린다.
+                    if agent_session:
+                        slack.set_session_status(
+                            conf.bot_token, channel, thread, "active"
+                        )
             pending = still
 
             _check_session_health(
@@ -783,7 +793,12 @@ def cmd_keeper_start(argv: list[str]) -> None:
         parent_pid=int(parent_arg) if parent_arg is not None else None,
         interval=float(interval_arg) if interval_arg is not None else None,
     )
-    print(f"{status}\t{pid}")
+    # 살아 있는 지킴이는 위의 로컬 상태/ps 판정만으로 즉시 돌아오며 Slack API를
+    # 호출하지 않는다. Monitor가 60초마다 안전하게 부를 수 있는 경로다.
+    if status == "THREAD_CLOSED":
+        print(status)
+    else:
+        print(f"{status}\t{pid}")
     if status == "STALE_KEEPER":
         print("기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요.")
     if status in ("THREAD_CLOSED", "DIED"):
