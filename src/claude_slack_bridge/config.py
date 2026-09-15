@@ -3,8 +3,9 @@
 토큰은 레포 안에 두지 않는다. 이 프로젝트는 공개될 예정이고, 값이 담긴 파일이
 이력에 한 번만 들어가도 되돌릴 수 없다. 그래서 홈 디렉터리 밖에 두고 권한을 좁힌다.
 
-우선순위는 환경변수 > 설정 파일이다. CI 나 컨테이너처럼 파일을 두기 곤란한
-환경에서 환경변수만으로 돌 수 있어야 하기 때문이다.
+토큰·채널 등은 환경변수 > 설정 파일이다 — 파일을 두기 곤란한 환경에서도 돌아야 한다.
+owner_id만은 설정 파일 값이 먼저고, 비어 있을 때만 SLACK_OWNER_ID를 쓴다. 파일 루트
+owner_id 하나만으로 따로 설정하지 않아도 주인이 정해져야 하기 때문이다.
 """
 
 from __future__ import annotations
@@ -41,20 +42,27 @@ def load() -> Config | None:
     token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
     channel = os.environ.get("SLACK_CHANNEL", "").strip()
 
-    if not (token and channel) and CONFIG_PATH.exists():
+    raw = {}
+    if CONFIG_PATH.exists():
         try:
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            raw = None
+        if not isinstance(raw, dict):
+            if not (token and channel):
+                return None
+            raw = {}
+
+    if not (token and channel) and raw:
         token = token or str(raw.get("bot_token", "")).strip()
         channel = channel or str(raw.get("channel", "")).strip()
-        owner = str(raw.get("owner_id", "")).strip()
         display_name = str(raw.get("display_name", "")).strip()
         icon_emoji = str(raw.get("icon_emoji", "")).strip()
         icon_url = str(raw.get("icon_url", "")).strip()
     else:
-        owner = display_name = icon_emoji = icon_url = ""
-    owner = os.environ.get("SLACK_OWNER_ID", owner).strip()
+        display_name = icon_emoji = icon_url = ""
+    owner = str(raw.get("owner_id", "")).strip()
+    owner = owner or os.environ.get("SLACK_OWNER_ID", "").strip()
     display_name = os.environ.get("SLACK_DISPLAY_NAME", display_name).strip()
     icon_emoji = os.environ.get("SLACK_ICON_EMOJI", icon_emoji).strip()
     icon_url = os.environ.get("SLACK_ICON_URL", icon_url).strip()

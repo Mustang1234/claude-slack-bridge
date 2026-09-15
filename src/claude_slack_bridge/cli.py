@@ -518,7 +518,7 @@ def cmd_keeper(argv: list[str]) -> None:
         # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
         bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
         require_mention = bool(state.get("require_mention"))
-        owner_id = state.get("owner_id") or conf.owner_id
+        owner_id = conf.owner_id or state.get("owner_id") or ""
         seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
         # 에이전트 세션을 여기서 만든다. 열기·붙기·되살리기 어느 경로든 지킴이는
         # 반드시 뜨므로 한 곳이면 된다. initiator 를 붙이는 것이 핵심이다 — 없으면
@@ -558,7 +558,7 @@ def cmd_keeper(argv: list[str]) -> None:
                 print("CLOSED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
-            owner_id = state.get("owner_id") or conf.owner_id
+            owner_id = conf.owner_id or state.get("owner_id") or ""
             # channels.json은 작고 listener 변경은 드물다. 캐시 무효화 복잡성을
             # 들이지 않고 매 폴링에 읽어 모든 열린 스레드에 즉시 반영한다.
             listeners = cfg.channel_listeners(channel)
@@ -611,7 +611,7 @@ def cmd_keeper(argv: list[str]) -> None:
                 cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
                 if cmd:
                     command_state = threads.load(thread) or state
-                    command_state.setdefault("owner_id", owner_id)
+                    command_state["owner_id"] = owner_id
                     if _apply_command(
                         conf.bot_token, channel, thread, label,
                         cmd[0], cmd[1], command_state,

@@ -75,7 +75,7 @@ JSON
 chmod 600 ~/.claude-slack-bridge/config.json
 ```
 
-환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` / `SLACK_OWNER_ID` 가 있으면 그쪽이 우선한다.
+환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` 은 설정 파일보다 우선한다. `owner_id`는 설정 파일 값을 우선하고, 비어 있을 때만 `SLACK_OWNER_ID`를 쓴다.
 
 이미 설정한 뒤 상태를 확인하려면 `claude-slack-bridge doctor` 를 쓴다.
 

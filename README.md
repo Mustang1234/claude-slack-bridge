@@ -184,7 +184,7 @@ listener는 채널 단위라 그 채널의 모든 스레드에 적용되고 세�
 ~/.claude-slack-bridge/channels.json (채널별 listener, 권한 600)
 ```
 
-환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` / `SLACK_OWNER_ID` 가 있으면 그쪽이 우선한다.
+환경변수 `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` 은 설정 파일보다 우선한다. `owner_id`는 설정 파일 값을 우선하고, 비어 있을 때만 `SLACK_OWNER_ID`를 쓴다.
 설정이 없으면 조용히 아무것도 하지 않으므로, 설치만 해두고 나중에 설정해도 된다.
 
 ### 발신자 이름·아이콘

@@ -91,7 +91,6 @@ def attach(
         "warned": False,
         "closed": False,
         "require_mention": not channel.startswith("D"),
-        "owner_id": "",
     }
     fields.update({key: value for key, value in defaults.items() if key not in state})
     threads.patch(thread_ts, **fields)
