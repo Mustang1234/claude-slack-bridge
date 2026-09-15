@@ -102,6 +102,13 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 "죽었나" 로 읽힌다. 불변식은 하나다: *열린 스레드가 있으면 이 세션에 Monitor 가 떠 있다.*
 스레드를 쥐는 순간과 폰에 답을 보내려는 순간, 이것을 먼저 확인한다.
 
+**Monitor 가 만료되면 묻지 않고 즉시 같은 명령으로 다시 띄운다.** Monitor 는 최대
+30분이면 harness 가 내리고 만료 알림 한 줄만 남긴다. 그 알림은 사용자 입력이 아니라 할
+일이다 — DM 이든 공개 채널이든, 계속 붙어 있을지 사용자에게 물어볼 참이든 먼저 다시
+띄우고 나서 묻는다. 내려간 채 두면 잠시 뒤 지킴이가 스레드에 "수신자(Monitor)가 붙어
+있지 않습니다" ⚠️ 를 올리고, 공개 채널이면 그 경고가 모두에게 보인다. 스레드에서
+빠지고 싶으면 Monitor 를 방치하지 말고 `slack_chat_close` 로 닫는다.
+
 지킴이 기동은 서버가 한다(open/attach 때 띄우고 30초마다 확인). Monitor 의 60초 점검은
 서버가 죽었을 때의 두 번째 층이다. 스레드가 닫히면 inbox 에 `{"event": "THREAD_CLOSED"}`
 줄이 오니 그때 Monitor 를 내린다. Monitor 가 잠시 내려가도 지킴이가 답장을 파일에
@@ -124,7 +131,7 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.0.2",
+    version="1.0.3",
     instructions=INSTRUCTIONS,
 )
 
