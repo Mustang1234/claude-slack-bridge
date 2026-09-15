@@ -88,6 +88,11 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 `slack_chat_list` 로 찾는다. 지킴이의 부모는 최초 spawn 한 세션으로 고정되므로, 두 세션이
 붙어 있어도 최초 세션이 끝나면 스레드가 닫힌다.
 
+**DM 스레드에서 다른 스레드로 옮길 때는 기존 스레드를 먼저 닫는다.** `slack_chat_close`
+는 이 세션이 지금 쥔 스레드를 닫으므로, 새 스레드를 `open`/`attach` 하기 전에 부르고
+닫은 스레드의 Monitor 는 TaskStop 으로 내린다. 순서가 뒤집히면 방금 붙은 새 스레드가
+닫힌다. 안 닫고 옮기면 DM 에 아무도 안 듣는 스레드가 마감까지 남는다.
+
 ## 스레드를 쥐었으면 Monitor 가 떠 있어야 한다
 
 `open`·`attach` 결과가 돌려주는 Monitor 명령을 Claude Code Monitor 툴(persistent)에서
@@ -119,7 +124,7 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.0.1",
+    version="1.0.2",
     instructions=INSTRUCTIONS,
 )
 
