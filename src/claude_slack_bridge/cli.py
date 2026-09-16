@@ -35,6 +35,17 @@ def _die(msg: str) -> None:
     raise SystemExit(1)
 
 
+def _red(text: str) -> str:
+    """경고만 빨갛게 한다.
+
+    터미널이 아닐 때(파이프·리다이렉트·문서 붙여넣기) 색을 넣으면 이스케이프가
+    리터럴로 남아 오히려 읽기 어려워진다. `NO_COLOR` 관례도 따른다.
+    """
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"\033[31m{text}\033[0m"
+
+
 def _arg(argv: list[str], name: str) -> str | None:
     """--name value 한 쌍을 꺼낸다. 없으면 None."""
     if name in argv:
@@ -163,6 +174,37 @@ TOKEN_HELP = """\
 """
 
 
+def permission_warning() -> str:
+    """설치 마지막에 권한 두 줄을 경고한다.
+
+    권한 분류기가 있는 하네스(Claude Code auto mode 등)에서는 이 서버의 툴이
+    세션↔스레드 바인딩을 홈에 영구 기록한다는 이유로 막히고, 지킴이를 띄우는
+    `keeper-start` 도 데몬 기동이라 같은 판정을 받는다. **그 권한은 모델이
+    스스로 넣을 수 없다** — 권한 파일 수정은 자기수정으로 다시 막힌다.
+
+    그래서 이 경고가 설치 시점에 있어야 한다. 미리 넣어두지 않으면 반드시 한 번
+    멈추고, 멈추는 시점이 하필 세션이 죽어 스레드로 돌아가려는 순간이다
+    (2026-09-16, docs/handoff-2026-09-16-attach-friction.md). 그때는 폰 스레드에
+    경고가 쌓이는 중이라 손댈 여유가 가장 없다.
+    """
+    return "\n".join([
+        _red("━━ 권한 · 하네스를 쓰면 반드시 먼저 넣을 것 ━━"),
+        "",
+        "  Claude Code auto mode 처럼 권한 분류기가 있는 환경에서는 이 서버의 툴과",
+        "  지킴이 기동이 '허가 없는 영속화' 로 분류돼 막힙니다.",
+        _red("  모델은 이 권한을 스스로 추가할 수 없습니다 — 설치할 때 사람이 한 번 넣어야 합니다."),
+        "",
+        "  settings.json 의 permissions.allow 에 두 줄:",
+        "",
+        '      "mcp__claude-slack-bridge",',
+        '      "Bash(*claude-slack-bridge keeper-start*)"',
+        "",
+        "  분류기가 없는 환경(권한을 직접 승인하는 설정)이면 지금은 넘어가도 됩니다.",
+        "  막히는 증상은 attach 나 Monitor 등록이 거부되는 것으로 나타납니다.",
+        "",
+    ])
+
+
 def cmd_manifest(argv: list[str]) -> None:
     text = read_manifest()
     if "--name" in argv:
@@ -280,6 +322,7 @@ def cmd_init(argv: list[str]) -> None:
     print(f"설정 저장: {path} (권한 600)\n")
     print("━━ 마지막 · Claude Code 에 붙이기 ━━\n")
     print("  claude mcp add claude-slack-bridge -s user -- uvx claude-slack-bridge\n")
+    print(permission_warning())
 
 
 def _keep_awake() -> "subprocess.Popen | None":
@@ -302,10 +345,12 @@ def _keep_awake() -> "subprocess.Popen | None":
         return None
 
 
-def _apply_command(token, channel, thread, label, kind, value, state, actor_id="") -> bool:
+def _apply_command(
+    token, channel, thread, label, kind, value, state, actor_id="", owner_id=""
+) -> bool:
     """폰에서 온 지킴이 명령을 처리한다. 닫혔으면 True."""
     now = time.time()
-    if not channel.startswith("D") and actor_id != state.get("owner_id"):
+    if not channel.startswith("D") and (not owner_id or actor_id != owner_id):
         # 채널에서는 listener 도 수신 필터를 통과하므로, 지킴이 명령(핑·연장·
         # 마감·닫기·듣기)은 여기서 주인만 남긴다. 예전에는 필터가 주인만 통과시켜
         # 이 게이트가 필요 없었다. DM 은 상대가 한 사람이라 거를 것이 없다.
@@ -334,7 +379,7 @@ def _apply_command(token, channel, thread, label, kind, value, state, actor_id="
                 reply = " ".join(f"<@{user_id}>" for user_id in value) + " 는 이제 듣지 않습니다."
             elif current:
                 people = ", ".join(f"<@{user_id}>" for user_id in current)
-                reply = f"이 채널에서 듣는 사람: <@{state['owner_id']}>(주인), {people}"
+                reply = f"이 채널에서 듣는 사람: <@{owner_id}>(주인), {people}"
             else:
                 reply = "이 채널에서 듣는 사람: 주인만"
         try:
@@ -518,7 +563,9 @@ def cmd_keeper(argv: list[str]) -> None:
         # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
         bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
         require_mention = bool(state.get("require_mention"))
-        owner_id = conf.owner_id or state.get("owner_id") or ""
+        # 주인은 config.json 하나에서만 읽는다. 스레드 기록의 사본은 attach 경로가
+        # 채우지 않아 비는 일이 있었고, 정본이 둘이면 어느 쪽이 맞는지부터 따져야 한다.
+        owner_id = conf.owner_id
         seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
         # 에이전트 세션을 여기서 만든다. 열기·붙기·되살리기 어느 경로든 지킴이는
         # 반드시 뜨므로 한 곳이면 된다. initiator 를 붙이는 것이 핵심이다 — 없으면
@@ -546,8 +593,10 @@ def cmd_keeper(argv: list[str]) -> None:
                 reason = "Claude 세션 종료"
                 if unread:
                     reason += f"\n읽지 못한 메시지: {len(unread)}건"
+                # 세션이 죽은 것은 대화가 끝난 것이 아니다. 재시작한 세션이 attach 로
+                # 돌아올 수 있게 재개 가능으로 닫는다.
                 if not chat.close_thread(
-                    conf.bot_token, channel, thread, label, reason,
+                    conf.bot_token, channel, thread, label, reason, resumable=True,
                 ):
                     print("PARENT_CLOSE_FAILED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -558,7 +607,6 @@ def cmd_keeper(argv: list[str]) -> None:
                 print("CLOSED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
-            owner_id = conf.owner_id or state.get("owner_id") or ""
             # channels.json은 작고 listener 변경은 드물다. 캐시 무효화 복잡성을
             # 들이지 않고 매 폴링에 읽어 모든 열린 스레드에 즉시 반영한다.
             listeners = cfg.channel_listeners(channel)
@@ -611,11 +659,10 @@ def cmd_keeper(argv: list[str]) -> None:
                 cmd = chat.parse_command(chat.strip_mention(m.get("text", ""), bot_user_id))
                 if cmd:
                     command_state = threads.load(thread) or state
-                    command_state["owner_id"] = owner_id
                     if _apply_command(
                         conf.bot_token, channel, thread, label,
                         cmd[0], cmd[1], command_state,
-                        str(m.get("user") or ""),
+                        str(m.get("user") or ""), owner_id,
                     ):
                         print("CLOSED_BY_USER")
                         threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -719,6 +766,43 @@ def _safe_patch(thread: str, **fields) -> bool:
     return True
 
 
+def _health_text(body: str, state: dict, channel: str, to_thread: str | None) -> str:
+    """DM 으로 돌려보낼 때는 어느 스레드 얘기인지 앞에 붙인다.
+
+    스레드 안에서는 문맥이 곧 스레드지만, DM 최상위로 빠지면 세션이 여럿일 때
+    무엇이 멈춘 것인지 가릴 단서가 없다. 라벨을 적어 두는 규칙이 여기서도 값을 한다.
+    """
+    if to_thread is not None:
+        return body
+    label = str(state.get("label") or "Claude 세션")
+    return f"*{label}* ({channel})\n{body}"
+
+
+def _health_target(
+    token: str, channel: str, thread: str, owner_id: str
+) -> tuple[str, str | None]:
+    """⚠️/✅ 를 보낼 곳을 고른다. 돌려주는 thread 가 None 이면 최상위 DM 이다.
+
+    이 두 알림은 동료에게 무의미하다. 팀 채널에서 "세션이 응답하지 않습니다 /
+    돌아왔습니다" 가 번갈아 반복되면 알릴 값은 없고 불안만 남는다 — 남이 보기에는
+    무엇이 고장났다는 신호로만 읽힌다(사용자 판단, 2026-09-16). 그래서 채널
+    스레드에서는 소유자 DM 으로 돌린다.
+
+    🔒 는 여기 해당하지 않아 그대로 스레드에 남긴다. 스레드가 끝난 것은 동료도
+    알아야 한다 — 모르면 죽은 스레드에 말을 걸고 답을 기다린다.
+
+    소유자 DM 을 열 수 없으면 스레드로 되돌아간다. 채널에 한 줄 남는 것보다
+    아무도 모르는 것이 나쁘다. 이 기능의 취지 자체가 침묵을 드러내는 것이다.
+    """
+    if channel.startswith("D") or not owner_id:
+        return channel, thread
+    try:
+        return slack.conversations_open(token, owner_id), None
+    except slack.SlackError:
+        print("HEALTH_DM_FAILED")
+        return channel, thread
+
+
 def _check_session_health(
     token: str,
     channel: str,
@@ -791,8 +875,13 @@ def _check_session_health(
         # 표식을 못 남겼으면 아예 보내지 않는다 — 다음 주기에 다시 시도한다.
         if not _safe_patch(thread, down_alerted=True):
             return
+        to_channel, to_thread = _health_target(token, channel, thread, owner_id)
         try:
-            slack.post_message(token, channel, chat.down_text(reason), thread_ts=thread)
+            slack.post_message(
+                token, to_channel,
+                _health_text(chat.down_text(reason), state, channel, to_thread),
+                thread_ts=to_thread,
+            )
         except slack.SlackError:
             _safe_patch(thread, down_alerted=False)   # 못 보냈으니 표식을 되돌린다
             return
@@ -808,9 +897,12 @@ def _check_session_health(
         # 경고를 보냈으면 끝도 반드시 보낸다. 안 그러면 복구된 것과 여전히
         # 죽어 있는 것이 폰에서 구분되지 않는다. 여기서는 보낸 뒤에 지운다 —
         # 못 보낸 채 지우면 ✅ 가 영영 사라지고, 반대는 한 번 더 보낼 뿐이다.
+        to_channel, to_thread = _health_target(token, channel, thread, owner_id)
         try:
             slack.post_message(
-                token, channel, chat.back_text(now - down_since), thread_ts=thread
+                token, to_channel,
+                _health_text(chat.back_text(now - down_since), state, channel, to_thread),
+                thread_ts=to_thread,
             )
         except slack.SlackError:
             return
