@@ -33,6 +33,26 @@ DOWN_GRACE = 60.0         # 이 상태가 이만큼 이어져야 알린다 — �
 LISTEN_CHECK = 30.0       # 수신자 확인(lsof)은 이 간격으로만 — 매 주기 돌릴 일이 아니다
 DEFAULT_HOURS = 10.0    # 하루 일과를 덮는 길이. 짧으면 자꾸 끊겨 되레 성가시다.
 
+# 닫혔어도 다시 붙을 수 있는 사유. 사람의 뜻과 무관하게 끊긴 것만 연다 — 폰에서
+# `닫기` 한 것, 세션이 닫기를 부른 것, 마감이 지난 것은 끝난 대화다. 새 기록은
+# close_thread 가 resumable 로 남기므로, 이 목록은 그 필드가 생기기 전에 닫힌
+# 기록을 읽을 때만 쓴다.
+_RESUMABLE_REASONS = ("Claude 세션 종료", "대화를 다른 곳으로 옮겼습니다")
+
+
+def resumable(state: dict) -> bool:
+    """이 스레드에 붙어도 되는가. 열려 있으면 물을 것도 없다.
+
+    세션이 죽어 재시작한 경우가 attach 가 있는 이유인데, 지킴이는 세션이 죽는
+    순간 스레드를 닫는다. 닫힌 스레드를 일괄 거부하면 정작 그 경로가 막히고,
+    상태 파일을 손으로 고치는 것 말고는 돌아갈 길이 없었다(2026-09-16).
+    """
+    if not state.get("closed"):
+        return True
+    if state.get("resumable") is not None:
+        return bool(state["resumable"])
+    return str(state.get("reason") or "").startswith(_RESUMABLE_REASONS)
+
 def attach(
     token: str,
     thread_ts: str,
@@ -56,8 +76,10 @@ def attach(
     """
     global _chat
     state = threads.load(thread_ts) or {}
-    if state.get("closed"):
-        raise NoChat(f"이미 닫힌 스레드입니다: {thread_ts}")
+    reopening = bool(state.get("closed"))
+    if not resumable(state):
+        reason = str(state.get("reason") or "").split("\n")[0]
+        raise NoChat(f"이미 닫힌 스레드입니다: {thread_ts} ({reason or '사유 없음'})")
 
     channel = channel or state.get("channel") or ""
     if not channel:
@@ -68,9 +90,11 @@ def attach(
     label_changed = bool(requested_label) and label != state.get("label")
     if hours is not None:
         deadline = time.time() + hours * 3600
-    elif state.get("deadline"):
+    elif state.get("deadline") and not (reopening and float(state["deadline"]) <= time.time()):
         deadline = float(state["deadline"])
     else:
+        # 다시 여는데 마감이 이미 지났으면 이어받을 마감이 없다. 그대로 두면
+        # 지킴이가 뜨자마자 "마감 시각 도달" 로 다시 닫는다.
         deadline = time.time() + DEFAULT_HOURS * 3600
 
     _chat = Chat(
@@ -93,8 +117,23 @@ def attach(
         "require_mention": not channel.startswith("D"),
     }
     fields.update({key: value for key, value in defaults.items() if key not in state})
+    if reopening:
+        # 닫힘 흔적만 지운다. down_since·down_alerted 는 두어야 한다 — ⚠️ 를
+        # 보낸 채 닫혔으면 다시 열린 뒤 ✅ 로 짝을 맞춰야 한다.
+        fields.update(closed=False, closed_at=None, reason=None, resumable=None, warned=False)
     threads.patch(thread_ts, **fields)
-    if label_changed:
+    if reopening:
+        # 🔒 는 "이제 읽지 않습니다" 라고 말해 두었다. 그대로 두면 동료는 계속
+        # 끝난 스레드로 알고 말을 걸지 않는다. 닫힘을 알렸으면 열림도 알린다.
+        try:
+            slack.post_message(
+                token, channel,
+                f"🔓 다시 이어받았습니다 ({time.strftime('%H:%M')})",
+                thread_ts=thread_ts,
+            )
+        except slack.SlackError:
+            pass
+    if label_changed or reopening:
         try:
             slack.chat_update(
                 token, channel, thread_ts,
@@ -273,9 +312,7 @@ def header_text(label: str, deadline: float) -> str:
     )
 
 
-def open_chat(
-    token: str, channel: str, hours: float, label: str | None, owner_id: str = ""
-) -> Chat:
+def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat:
     """대화를 열어 이 세션에 묶는다.
 
     스레드 하나가 세션 하나다. ntfy 의 슬롯 여덟 개가 하던 일을 스레드가 하되,
@@ -304,7 +341,8 @@ def open_chat(
         "closed": False,
         # 채널이면 멘션을 요구한다. DM 은 상대가 나뿐이라 필요 없다.
         "require_mention": not channel.startswith("D"),
-        "owner_id": owner_id,
+        # owner_id 는 적지 않는다. 주인은 config.json 하나가 정본이다 — 스레드마다
+        # 사본을 두면 사본을 안 채우는 경로(attach)에서 주인이 비어 버린다.
         "owner_missing_warned": False,
     })
     return _chat
@@ -328,11 +366,18 @@ def extend(token: str, hours: float) -> Chat:
     return chat
 
 
-def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: str) -> bool:
+def close_thread(
+    token: str, channel: str, thread_ts: str, label: str, reason: str,
+    resumable: bool = False,
+) -> bool:
     """스레드를 닫는다 — 지우지 않고 표시만 남긴다.
 
     머리글에 취소선을 긋는 이유: 답글로만 "닫혔다" 고 적으면 스레드를 펼쳐야
     알 수 있다. 머리글이 그어져 있으면 대화 목록에서 바로 보인다.
+
+    resumable 은 나중에 attach 로 다시 열어도 되는지다. 기본은 닫힘이 끝이고,
+    세션 사망·옮기기처럼 사람이 끝내지 않은 경로만 True 를 넘긴다. 사유 문구로
+    판정하지 않는 이유는 문구가 바뀌는 순간 판정이 조용히 깨지기 때문이다.
     """
     stamp = time.strftime("%H:%M")
     notified = True
@@ -354,15 +399,20 @@ def close_thread(token: str, channel: str, thread_ts: str, label: str, reason: s
         # 있는 쪽이 나쁘다.
         notified = False
     slack.set_session_status(token, channel, thread_ts, "closed")
-    threads.patch(thread_ts, closed=True, closed_at=time.time(), reason=reason)
+    threads.patch(
+        thread_ts, closed=True, closed_at=time.time(), reason=reason, resumable=resumable
+    )
     return notified
 
 
-def close_chat(token: str, reason: str = "작업이 끝났습니다") -> None:
+def close_chat(token: str, reason: str = "작업이 끝났습니다", resumable: bool = False) -> None:
     global _chat
     if _chat is None:
         return
-    close_thread(token, _chat.channel, _chat.thread_ts, _chat.label or "Claude 세션", reason)
+    close_thread(
+        token, _chat.channel, _chat.thread_ts, _chat.label or "Claude 세션", reason,
+        resumable=resumable,
+    )
     _chat = None
 
 

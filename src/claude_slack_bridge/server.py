@@ -26,27 +26,42 @@ INSTRUCTIONS = """\
 Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙은 이 서버가 배포한다 —
 사용자 쪽 CLAUDE.md 에 같은 내용을 다시 적을 필요가 없다.
 
-## 답은 그 사안이 열린 경로로 보낸다
+## 답은 들어온 길로 나간다
+
+터미널에서 물으면 터미널로, 슬랙에서 물으면 슬랙으로 답한다. 여러 사람이 있는 채널
+스레드도 예외가 아니다 — 동료가 보는 앞에서 멘션해 놓고 답이 아무 데도 안 보이면, 그
+사람에게는 고장난 것과 구분되지 않는다.
 
 **사용자의 마지막 입력이 폰(inbox)이면, 사용자에게 보이는 말은 길이와 무관하게 전부
 `slack_notify` 로 그 스레드에 보낸다.** "받았다", "그대로 대기한다", "끝나면 보고하겠다",
 되묻기, 거절, 중간 경과 — 전부다. 짧다고, 즉답이라고 생략하지 않는다. 터미널에만 쓴
 말은 사용자에게 닿지 않는다.
 
-**스레드를 거친 사안은 스레드에서 끝낸다.** 스레드에서 온 요청이든 내가 스레드에 던진 질문이든,
-사용자의 답이 터미널로 오더라도 그 사안의 결론("이렇게 반영한다", "이 결정으로 간다")은
-스레드에 남긴다. 불변식은 한 줄이다: *스레드에 미완 항목 — 답 없는 내 질문, 결론 없는 요청 —
-을 남기지 않는다.* 위의 "마지막 입력이 폰이면 전부 스레드로"는 이 규칙의 특수한 경우다.
+채널에서 달라지는 것은 경로가 아니라 **내용의 양**이다. 스레드에는 팀이 알아야 할 결론만
+남기고, 내부 사정 — 세션의 생사, 권한이 막힌 사유, 디버깅 경과, 미결 질문 — 은 터미널로
+돌린다. 길어질 것 같으면 스레드는 한 줄로 끝내고 나머지를 터미널에 쓴다. 단, 사용자에게
+답을 받아야 하는 되묻기는 사용자에게 보이는 말이므로 스레드에 남긴다.
 
-이유는 화면 표시에 있다. 지킴이는 사용자 메시지를 받는 순간 스레드에 "앱이 작업 중…"
-표시를 켜고, 그 표시는 **세션이 `slack_notify` 로 스레드에 글을 써야만 꺼진다.** 세션이
-30초 안에 답하지 않으면 지킴이가 "네, 봤습니다. 정리되는 대로 답드릴게요" 를 대신 남기고
-표시를 내리지만, 그것은 세션의 답이 아니다 — 5분이 지나도록 세션의 답이 없으면 지킴이가
-"답이 없다"는 ⚠️ 를 사용자에게 보낸다. 실제로 "일단 ㅇㅋ" 한 줄에 터미널로만
-"대기합니다" 라고 답해 이 일이 있었다.
+**스레드를 거친 사안은 스레드에서 끝낸다.** 스레드에서 온 요청이든 내가 스레드에 던진
+질문이든, 사용자의 답이 터미널로 오더라도 그 사안의 결론("이렇게 반영한다", "이 결정으로
+간다")은 스레드에 남긴다. 불변식은 한 줄이다: *스레드에 미완 항목 — 답 없는 내 질문,
+결론 없는 요청 — 을 남기지 않는다.*
 
-폰 스레드에 답할 때는 `channel` 을 지정하지 않는다. 지정하면 스레드 밖 최상위로 나가고
-세션의 답으로 기록되지 않아, 답을 했는데도 작업 중 표시와 ⚠️ 가 그대로 나간다.
+서버가 스스로 스레드에 남기는 것 둘은 세션이 막으려 하지 말 것.
+
+- 30초 대체 답글("받았습니다. 세션이 작업 중입니다") — 멘션한 동료가 "왜 안 되지"
+  하고 헤매지 않게 해주는 유일한 신호다.
+- 🔒 종료 알림 — 스레드가 끝난 것은 동료도 알아야 한다. 모르면 죽은 스레드에 말을
+  걸고 답을 기다린다.
+
+⚠️/✅(세션 무응답·복귀)는 반대다. 동료에게 무의미하고 반복되면 불안만 남기므로 소유자
+DM 으로 나간다.
+
+지킴이는 사용자 메시지를 받는 순간 스레드에 "앱이 작업 중…" 표시를 켜고, 그 표시는
+**세션이 `slack_notify` 로 스레드에 글을 써야만 꺼진다.** 30초 대체 답글은 표시를 내리지만
+세션의 답으로 기록되지는 않는다. 폰 스레드에 답할 때는 `channel` 을 지정하지 않는다.
+지정하면 스레드 밖 최상위로 나가고 세션의 답으로 기록되지 않아, 답을 했는데도 작업 중
+표시와 ⚠️ 가 그대로 나간다.
 
 **터미널에서 시작해 터미널에서 끝난 사안은 터미널에만 답한다.** 스레드가 열려 있다는 것은
 신호가 아니다 — "열려 있으면 폰으로도" 라고 하면 터미널 대화 전부가 폰에 복사돼 알림 폭탄이
@@ -105,9 +120,10 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 **Monitor 가 만료되면 묻지 않고 즉시 같은 명령으로 다시 띄운다.** Monitor 는 최대
 30분이면 harness 가 내리고 만료 알림 한 줄만 남긴다. 그 알림은 사용자 입력이 아니라 할
 일이다 — DM 이든 공개 채널이든, 계속 붙어 있을지 사용자에게 물어볼 참이든 먼저 다시
-띄우고 나서 묻는다. 내려간 채 두면 잠시 뒤 지킴이가 스레드에 "수신자(Monitor)가 붙어
-있지 않습니다" ⚠️ 를 올리고, 공개 채널이면 그 경고가 모두에게 보인다. 스레드에서
-빠지고 싶으면 Monitor 를 방치하지 말고 `slack_chat_close` 로 닫는다.
+띄우고 나서 묻는다. 내려간 채 두면 잠시 뒤 지킴이가 "수신자(Monitor)가 붙어 있지
+않습니다" ⚠️ 를 올린다 — DM 스레드면 그 스레드에, 채널 스레드면 소유자 DM 으로 간다.
+어느 쪽이든 사용자에게는 "세션이 죽었다" 로 보인다. 스레드에서 빠지고 싶으면 Monitor 를
+방치하지 말고 `slack_chat_close` 로 닫는다.
 
 지킴이 기동은 서버가 한다(open/attach 때 띄우고 30초마다 확인). Monitor 의 60초 점검은
 서버가 죽었을 때의 두 번째 층이다. 스레드가 닫히면 inbox 에 `{"event": "THREAD_CLOSED"}`
@@ -127,11 +143,36 @@ Claude Code 세션과 사용자의 폰(Slack)을 잇는 다리다. 아래 규칙
 스레드는 `init`에서 설정한 기본 목적지에 열린다. 다른 팀 채널에서 같이 봐야 하는 일이면
 `channel="#이름"`으로 지정한다. 설정이 없으면 모든 툴이 조용히 아무것도 하지 않는다.
 그것 때문에 작업을 멈추지 말 것.
+
+## 옮길 때는 `slack_chat_switch`
+
+이미 스레드가 열려 있는데 다른 곳에서 이어가야 하면 — DM 에서 하던 얘기를 팀 채널로
+올릴 때가 대부분이다 — `open` 을 다시 부르지 말고 `slack_chat_switch(channel=...)` 를
+쓴다. `open` 은 그 경우 거부한다. 옛 스레드를 닫지 않고 바인딩만 덮어써서, 지킴이가
+계속 돌고 옛 Monitor 가 옛 메시지로 세션을 깨우고 그 스레드가 마감까지 살아남는
+고아 상태를 만들었기 때문이다.
+
+`switch` 는 목적지를 먼저 확인한 다음 옛 스레드를 닫는다. 채널·DM만 주면 새 스레드를
+열고, 스레드 URL을 주면 그 스레드에 붙는다. 옛 스레드에는 🔒 를 남긴다 — 잠시 멈춘 것은
+동료가 몰라도 되지만 아예 끝난 것은 알아야 한다. **옛 Monitor 는 서버가 내릴 수 없다.**
+반환문이 알려주는 옛 thread의 Monitor를 TaskStop으로 내리고, 옮긴 스레드용 Monitor를
+새로 띄운다.
+
+채널로 옮기면 소유자와 소유자가 끼운 사람의 **@멘션만** 들어온다. 멘션 없는 말은 조용히
+버려지므로, 옮긴 직후 사용자에게 그 한 줄을 알려준다.
+
+Slack URL을 목적지로 받으면 채널 URL은 그 채널에 새 스레드를 열고, 스레드·답글 URL은
+부모 스레드에 붙는다. `slack_chat_open`은 URL의 채널 부분만 쓰며, 이미 열린 대화를 URL로
+옮길 때도 `slack_chat_switch(target=...)`를 써서 옛 스레드를 닫고 고아를 남기지 않는다.
+
+내가 보낸 Slack 메시지를 지우거나 고칠 때는 메시지 URL을 `target`에 주거나, `ts`를 직접
+주거나, 본문 일부를 `match`에 준다. 우선순위는 URL → ts → 본문이고, 후보가 여러 개면
+반환된 ts를 다시 지정한다. 머리글은 스레드 전체가 사라지므로 명시적으로 지목할 때만 지운다.
 """
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.0.3",
+    version="1.2.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -234,6 +275,190 @@ def slack_check() -> str:
     return "\n".join(lines)
 
 
+def _own_message(message: dict, identity: dict) -> bool:
+    """Slack의 cant_delete_message 대신 읽을 수 있는 소유권 오류를 먼저 만든다."""
+    user_id = str(identity.get("user_id") or "")
+    bot_id = str(identity.get("bot_id") or "")
+    return bool(
+        (user_id and str(message.get("user") or "") == user_id)
+        or (bot_id and str(message.get("bot_id") or "") == bot_id)
+    )
+
+
+def _message_excerpt(message: dict) -> str:
+    text = str(message.get("text") or "").replace("\n", " ")
+    return f"{message.get('ts', '?')}  {text[:40]}"
+
+
+def _message_list(messages: list[dict]) -> str:
+    return "\n".join(_message_excerpt(message) for message in messages) or "(없음)"
+
+
+def _message_action(
+    action: str,
+    match: str,
+    ts: str | None,
+    channel: str | None,
+    text: str | None = None,
+    target: str | None = None,
+) -> str:
+    target = (target or "").strip()
+    explicit_ts = (ts or "").strip()
+    match = match or ""
+    if not target and not explicit_ts and not match:
+        return (
+            "대상 메시지를 지정하지 않았습니다. 메시지 URL은 target, 정확한 시각은 ts, "
+            "본문 일부는 match로 주세요."
+        )
+
+    conf = cfg.load()
+    if conf is None:
+        return SETUP_HINT
+
+    bound = _live_binding()
+    scope_channel = bound.channel if bound else ""
+    scope_thread = bound.thread_ts if bound else ""
+    outside_note = ""
+    try:
+        if target:
+            # URL에는 메시지 자신(message_ts)과 부모(parent_ts)가 함께 있다.
+            # 여기서는 삭제·수정 대상인 message_ts를 고르고, 조회 범위에만
+            # parent_ts를 쓴다. 목적지 계열과 반대로 고르면 부모를 지울 수 있다.
+            parsed_channel, message_ts, parent_ts = slack.parse_target(target)
+            if not message_ts or not parent_ts or parsed_channel == target:
+                raise chatmod.NoChat(
+                    "target에서 Slack 메시지 URL을 읽지 못했습니다. "
+                    "/archives/.../p... 형태의 URL을 주세요."
+                )
+            scope_channel = slack.resolve_target(
+                conf.bot_token, parsed_channel, conf.channel
+            )
+            scope_thread = parent_ts
+            explicit_ts = message_ts
+            if bound and (
+                bound.channel != scope_channel or bound.thread_ts != scope_thread
+            ):
+                outside_note = "\n참고: 이 URL은 현재 묶인 스레드 밖의 메시지를 가리킵니다."
+        elif channel:
+            parsed_channel, _, parent_ts = slack.parse_target(channel)
+            scope_channel = slack.resolve_target(
+                conf.bot_token, parsed_channel, conf.channel
+            )
+            if parent_ts:
+                scope_thread = parent_ts
+        if not scope_channel:
+            raise chatmod.NoChat("열린 대화가 없습니다. channel 을 함께 주세요.")
+        if not scope_thread:
+            if explicit_ts:
+                # 바인딩 없이 직접 지정한 ts는 부모 메시지일 때만 조회할 수 있다.
+                scope_thread = explicit_ts
+            else:
+                raise chatmod.NoChat("검색할 스레드가 없습니다.")
+
+        identity = slack.auth_test(conf.bot_token)
+        messages = slack.conversations_replies(
+            conf.bot_token, scope_channel, scope_thread
+        )
+    except (chatmod.NoChat, slack.SlackError) as e:
+        verb = "지우지" if action == "delete" else "고치지"
+        return f"{verb} 못했습니다.\n{e}{outside_note}"
+
+    # bot 토큰은 남의 메시지를 어차피 고치거나 지울 수 없다. 이 선검사는 보안
+    # 장벽이 아니라 Slack의 cant_delete_message보다 사람이 읽을 설명을 먼저 주기 위함이다.
+    own_messages = [message for message in messages if _own_message(message, identity)]
+    if explicit_ts:
+        exact = [message for message in messages if str(message.get("ts") or "") == explicit_ts]
+        if not exact:
+            verb = "지우지" if action == "delete" else "고치지"
+            return (
+                f"{verb} 못했습니다.\nts={explicit_ts} 메시지를 찾지 못했습니다.\n"
+                f"이 스레드의 봇 메시지:\n{_message_list(own_messages)}{outside_note}"
+            )
+        if not _own_message(exact[0], identity):
+            verb = "지우지" if action == "delete" else "고치지"
+            return (
+                f"{verb} 못했습니다.\nts={explicit_ts}는 봇 자신이 쓴 메시지가 아닙니다."
+                f"{outside_note}"
+            )
+        candidates = exact
+    else:
+        candidates = [
+            message for message in own_messages
+            if match in str(message.get("text") or "")
+        ]
+        if not candidates:
+            return (
+                f"'{match}'을(를) 찾지 못했습니다.\n"
+                f"이 스레드의 봇 메시지:\n{_message_list(own_messages)}{outside_note}"
+            )
+        if len(candidates) > 1:
+            return (
+                f"'{match}'과(와) 일치하는 봇 메시지가 {len(candidates)}개입니다. "
+                "고르지 않았습니다. ts를 지정하세요.\n"
+                f"후보:\n{_message_list(candidates)}{outside_note}"
+            )
+
+    message = candidates[0]
+    message_ts = str(message.get("ts") or "")
+    old_text = str(message.get("text") or "")
+    if action == "delete" and message_ts == scope_thread and not explicit_ts:
+        return (
+            "이 메시지는 스레드의 부모(머리글)라서 지우면 스레드 전체가 사라집니다. "
+            f"실행하려면 ts={message_ts}를 명시하세요.\n"
+            f"대상: {_message_excerpt(message)}{outside_note}"
+        )
+
+    try:
+        if action == "delete":
+            slack.chat_delete(conf.bot_token, scope_channel, message_ts)
+            return f"지웠습니다: {_message_excerpt(message)}{outside_note}"
+        slack.chat_update(conf.bot_token, scope_channel, message_ts, text or "")
+        return (
+            f"고쳤습니다: {message_ts}\n이전: {old_text}\n새 본문: {text or ''}"
+            f"{outside_note}"
+        )
+    except slack.SlackError as e:
+        verb = "지우지" if action == "delete" else "고치지"
+        return f"{verb} 못했습니다.\n{e}{outside_note}"
+
+
+@server.tool(
+    name="slack_message_delete",
+    title="내 Slack 메시지 지우기",
+    description=(
+        "봇 자신이 쓴 메시지를 URL(target), 정확한 ts, 본문 일부(match) 순으로 "
+        "지정해 지운다. 여러 건이면 실행하지 않고 ts 선택을 요구한다."
+    ),
+)
+def slack_message_delete(
+    match: str = "",
+    ts: str | None = None,
+    channel: str | None = None,
+    target: str | None = None,
+) -> str:
+    """봇 자신이 쓴 메시지를 지운다."""
+    return _message_action("delete", match, ts, channel, target=target)
+
+
+@server.tool(
+    name="slack_message_edit",
+    title="내 Slack 메시지 고치기",
+    description=(
+        "봇 자신이 쓴 메시지를 URL(target), 정확한 ts, 본문 일부(match) 순으로 "
+        "지정해 새 본문으로 고친다. 여러 건이면 ts 선택을 요구한다."
+    ),
+)
+def slack_message_edit(
+    text: str,
+    match: str = "",
+    ts: str | None = None,
+    channel: str | None = None,
+    target: str | None = None,
+) -> str:
+    """봇 자신이 쓴 메시지를 고친다."""
+    return _message_action("edit", match, ts, channel, text, target)
+
+
 def _bot_user_id(token: str) -> str:
     """내가 보낸 메시지를 걸러내려면 내 user id 를 알아야 한다."""
     global _BOT_ID
@@ -300,6 +525,22 @@ _KEEPER_THREAD_STARTED = False
 def _forget_owned(thread_ts: str) -> None:
     with _OWNED_LOCK:
         _OWNED.discard(thread_ts)
+
+
+def _live_binding() -> "chatmod.Chat | None":
+    """이 세션에 아직 살아 있는 스레드가 묶여 있으면 그것을 돌려준다.
+
+    메모리의 `_chat` 만 보면 안 된다 — 폰에서 `닫기` 를 하거나 마감이 지나면
+    스레드는 닫혔는데 이 값은 그대로 남는다. 그 잔재를 "묶여 있음" 으로 읽으면
+    새로 열 길까지 막힌다. 그래서 상태 파일의 `closed` 까지 겹쳐 본다.
+    """
+    bound = chatmod._chat
+    if bound is None:
+        return None
+    state = threads.load(bound.thread_ts)
+    if state is None or state.get("closed"):
+        return None
+    return bound
 
 
 def _keeper_loop() -> None:
@@ -413,7 +654,8 @@ def slack_chat_open(
     Args:
         hours: 스레드를 유지할 시간. 기본 10시간.
         channel: 스레드를 열 곳. 생략하면 init에서 설정한 기본 목적지.
-            팀이 같이 봐야 하는 일이면 "#채널명" 으로 지정한다. 채널에서는
+            Slack URL이면 채널 부분만 쓰고 새 스레드를 연다. 팀이 같이 봐야 하는
+            일이면 "#채널명" 으로 지정한다. 채널에서는
             소유자와 소유자가 그 채널에서 `듣기 @사람` 으로 끼운 사람의 @멘션만 지시로 받는다.
             inbox 의 user 필드로 실제 발신자를 구분해 요청을 판단한다.
         label: 스레드 첫 줄에 붙일 라벨. "프로젝트 · 작업명" 형태로 적는다.
@@ -424,12 +666,24 @@ def slack_chat_open(
     conf = cfg.load()
     if conf is None:
         return SETUP_HINT
+    live = _live_binding()
+    if live is not None:
+        return (
+            f"이미 이 세션에 묶인 스레드가 있습니다(thread={live.thread_ts}, "
+            f"{'DM' if live.channel.startswith('D') else live.channel}).\n"
+            "여기서 열면 옛 스레드가 닫히지 않고 고아로 남습니다 — 지킴이가 계속 돌고, "
+            "옛 Monitor 가 옛 메시지로 세션을 깨우며, 그 스레드는 마감까지 살아 있습니다.\n"
+            "옮기려면 slack_chat_switch(channel=...) 를 쓰세요. 닫고 끝낼 거면 "
+            "slack_chat_close 입니다."
+        )
     # 라벨이 없으면 작업 디렉터리 이름을 쓴다. 세션이 여럿일 때 폰에서 스레드를
     # 구분하는 유일한 단서라, 비워두면 넷 다 같은 이름으로 보인다.
     label = label or os.path.basename(os.getcwd()) or None
     try:
-        target = slack.resolve_target(conf.bot_token, channel or "", conf.channel)
-        c = chatmod.open_chat(conf.bot_token, target, hours, label, conf.owner_id)
+        parsed_channel, _, _ = slack.parse_target(channel or "")
+        target = slack.resolve_target(conf.bot_token, parsed_channel, conf.channel)
+        slack.assert_member(conf.bot_token, target)
+        c = chatmod.open_chat(conf.bot_token, target, hours, label)
     except slack.SlackError as e:
         return f"열지 못했습니다.\n{e}"
     # thread ts 와 inbox 절대경로를 돌려줘야 세션 쪽 Monitor 가 작업 중에 오는
@@ -441,6 +695,144 @@ def slack_chat_open(
         f"thread={c.thread_ts}\n"
         f"{_startup_lines(c, keeper_status)}"
     )
+
+
+@server.tool(
+    name="slack_chat_switch",
+    title="대화를 다른 곳으로 옮기기",
+    description=(
+        "열려 있는 스레드를 닫고 다른 목적지에 이 세션을 묶는다. 채널·DM URL이면 "
+        "새 스레드를 열고, 스레드·답글 URL이면 그 부모 스레드에 붙는다. "
+        "옛 스레드는 🔒 로 닫아 남긴다 — 잠시 멈춘 것은 동료가 몰라도 되지만 아예 "
+        "끝난 것은 알아야 한다. 옛 Monitor 는 서버가 내릴 수 없으므로, 반환문이 "
+        "알려주는 TaskStop 은 세션이 직접 해야 한다."
+    ),
+)
+def slack_chat_switch(
+    target: str = "",
+    hours: float = 10.0,
+    label: str | None = None,
+    channel: str | None = None,
+) -> str:
+    """대화를 다른 곳으로 옮긴다.
+
+    `open` 을 다시 부르는 것과 다르다. `open` 은 메모리의 바인딩만 덮어써서 옛
+    스레드를 고아로 남겼다 — 지킴이가 계속 돌고, 옛 Monitor 가 옛 메시지로 세션을
+    깨우고, 그 스레드는 마감까지 살아 있었다. 그래서 옮기기를 한 동작으로 만든다.
+
+    순서가 요점이다. **목적지를 먼저 확인하고 그 다음에 닫는다.** 반대로 하면
+    새로 여는 데 실패했을 때 돌아갈 곳이 없다 — 닫힌 스레드에는 `attach` 도
+    거부되고(그 사고가 이 기능의 출발점이다) 손으로 상태 파일을 고치는 수밖에
+    없었다.
+
+    Args:
+        target: 옮겨 갈 곳. Slack URL, "#채널명" 또는 대화 ID. URL에 스레드가
+            있으면 새로 열지 않고 그 스레드에 붙는다.
+        hours: 새 스레드를 유지할 시간. 기본 10시간.
+        label: 새 스레드의 라벨. 생략하면 옛 라벨을 그대로 물려받는다.
+        channel: 이전 호출과의 호환용 target 별칭. 주면 target보다 우선한다.
+    """
+    conf = cfg.load()
+    if conf is None:
+        return SETUP_HINT
+    old = _live_binding()
+    label = label or (old.label if old else None) or os.path.basename(os.getcwd()) or None
+
+    # 1) 목적지 확정. 닫기보다 반드시 앞이어야 한다.
+    try:
+        requested = channel if channel is not None else target
+        # 목적지 계열은 message_ts가 아니라 parent_ts를 쓴다. 답글 자신의 ts에
+        # 붙으면 원래 대화로 가는 대신 답글 아래에 새 스레드가 갈라진다.
+        parsed_channel, _, target_parent = slack.parse_target(requested or "")
+        destination = slack.resolve_target(
+            conf.bot_token, parsed_channel, conf.channel
+        )
+        slack.assert_member(conf.bot_token, destination)
+        # 채널에 닿는다고 스레드에 붙을 수 있는 것은 아니다. 이 검사가 없던 때는
+        # 채널 확인만 통과한 채 옛 스레드를 닫고, 목적지가 닫힌 스레드라 attach 가
+        # 거부돼 어디에도 묶이지 않은 세션이 남았다(2026-09-16).
+        if target_parent:
+            if old is not None and target_parent == old.thread_ts:
+                return f"이미 이 스레드에 있습니다(thread={old.thread_ts})."
+            if not chatmod.resumable(threads.load(target_parent) or {}):
+                raise chatmod.NoChat(f"목적지가 다시 열 수 없는 닫힌 스레드입니다: {target_parent}")
+    except (slack.SlackError, chatmod.NoChat) as e:
+        if old is None:
+            return f"옮기지 않았습니다 — 목적지를 쓸 수 없습니다.\n{e}"
+        where = "DM" if old.channel.startswith("D") else old.channel
+        return (
+            f"옮기지 않았습니다 — 목적지를 쓸 수 없습니다.\n{e}\n"
+            f"기존 스레드({where}, thread={old.thread_ts})는 그대로 열려 있습니다."
+        )
+
+    # 2) 옛 스레드를 닫는다. kill 하지 않는다 — 지킴이는 상태의 closed 를 보고
+    #    스스로 빠지고, 그래야 죽은 pid 가 파일에 남아 사망 원인을 흐리지 않는다.
+    old_ts = ""
+    if old is None:
+        closed_note = "닫을 스레드가 없어 새로 여는 것만 했습니다."
+    else:
+        old_ts = old.thread_ts
+        # 재개 가능으로 닫는다. 3단계가 실패하면 여기로 되돌아와야 하고, 사용자가
+        # 나중에 이 스레드로 다시 옮겨 오라고 할 수도 있다.
+        chatmod.close_chat(
+            conf.bot_token, reason="대화를 다른 곳으로 옮겼습니다", resumable=True
+        )
+        _forget_owned(old_ts)
+        closed_note = f"옛 스레드(thread={old_ts})를 닫았습니다."
+
+    # 3) URL이 가리킨 기존 스레드에 붙거나, 스레드가 없으면 새로 연다.
+    try:
+        if target_parent:
+            c = chatmod.attach(
+                conf.bot_token, target_parent, destination, hours, label
+            )
+        else:
+            c = chatmod.open_chat(conf.bot_token, destination, hours, label)
+    except (chatmod.NoChat, slack.SlackError) as e:
+        destination_kind = "기존 스레드에 붙지" if target_parent else "새 스레드를 열지"
+        # 선검증을 통과해도 네트워크는 그 사이에 죽을 수 있다. 묶인 곳 없는 세션을
+        # 남기지 않도록 방금 닫은 스레드로 되돌린다.
+        if old is not None:
+            try:
+                back = chatmod.attach(conf.bot_token, old_ts, old.channel, None, old.label)
+            except (chatmod.NoChat, slack.SlackError):
+                back = None
+            if back is not None:
+                keeper_status = _start_keeper(back.thread_ts)
+                return (
+                    f"옮기지 못해 원래 스레드로 되돌렸습니다 — {destination_kind} 못했습니다.\n{e}\n"
+                    f"thread={back.thread_ts}\n"
+                    f"{_startup_lines(back, keeper_status)}"
+                )
+        return (
+            f"{closed_note}\n"
+            f"그런데 {destination_kind} 못했습니다.\n{e}\n"
+            "지금 이 세션에는 묶인 스레드가 없습니다. 새 대화면 slack_chat_open, "
+            "기존 스레드면 slack_chat_attach로 다시 묶으세요. 옛 스레드는 이미 닫혔습니다."
+        )
+
+    where = "DM" if c.channel.startswith("D") else c.channel
+    keeper_status = _start_keeper(c.thread_ts)
+    moved_kind = "기존 스레드에 붙었습니다" if target_parent else "새 스레드를 열었습니다"
+    lines = [
+        f"옮겼습니다 → {where}, {moved_kind}. "
+        f"마감까지 {chatmod.fmt_remaining(c.remaining)} 남았습니다.",
+        closed_note,
+    ]
+    if old_ts:
+        lines.append(
+            f"옛 스레드를 tail 하던 Monitor 를 TaskStop 으로 내리세요(thread {old_ts}). "
+            "닫았으므로 옛 Monitor 도 다음 60초 점검에서 THREAD_CLOSED 를 보고 스스로 "
+            "빠지지만, 그 사이 옛 inbox 에 남은 줄로 세션이 한 번 깨어날 수 있습니다."
+        )
+    if not c.channel.startswith("D"):
+        lines.append(
+            "채널이므로 이제 소유자·listeners 의 @멘션만 들어옵니다. 멘션 없는 말은 "
+            "조용히 버려지니 사용자에게 알려주세요."
+        )
+    lines.append(f"thread={c.thread_ts}")
+    lines.append(_startup_lines(c, keeper_status))
+    return "\n".join(lines)
 
 
 @server.tool(
@@ -496,8 +888,9 @@ def slack_chat_attach(
     """기존 스레드에 붙는다.
 
     Args:
-        thread_ts: 붙을 스레드의 ts. Slack 링크 끝의 p1787803636465309 는
-            1787803636.465309 로 읽는다(뒤에서 여섯 자리 앞에 점).
+        thread_ts: 붙을 스레드의 ts 또는 Slack 스레드·답글 URL. 링크 끝의
+            p1787803636465309 는 1787803636.465309 로 읽는다(뒤에서 여섯 자리
+            앞에 점). 답글 URL은 query의 부모 thread_ts에 붙는다.
         channel: 그 스레드가 있는 대화. 기록이 있으면 생략해도 된다.
         hours: 마감을 다시 잡을 때만. 생략하면 기록된 마감을 잇는다.
         label: 라벨을 바꿀 때만.
@@ -506,11 +899,29 @@ def slack_chat_attach(
     if conf is None:
         return SETUP_HINT
     try:
+        raw_thread = thread_ts.strip()
+        # attach도 목적지 동작이므로 답글 자신의 message_ts가 아니라 부모인
+        # parent_ts를 쓴다. 둘을 바꾸면 답글 아래에 대화가 하나 더 갈라진다.
+        url_channel, _, url_parent = slack.parse_target(raw_thread)
+        if url_channel != raw_thread and not url_parent:
+            raise chatmod.NoChat("URL에 붙을 스레드가 없습니다. 스레드·답글 URL을 주세요.")
+        actual_thread = url_parent or raw_thread
+
         # 기록이 없는 스레드(영속화 이전에 열린 것)에도 붙을 수 있어야 한다.
         # 그때는 설정의 기본 대화에 있다고 본다 — 대개 맞고, 틀리면 읽기가
         # 실패하면서 바로 드러난다.
-        target = slack.resolve_target(conf.bot_token, channel or "", conf.channel)
-        c = chatmod.attach(conf.bot_token, thread_ts.strip(), target, hours, label)
+        # 채널을 안 주면 기록된 채널이 답이다. 곧장 설정의 기본 대화로 채우면
+        # chat.attach 가 그 값으로 기록을 덮어써 채널 스레드가 DM 에 묶이고, 지킴이는
+        # DM 에서 그 ts 를 찾으며 아무것도 받지 못한다(2026-09-16).
+        recorded = str((threads.load(actual_thread) or {}).get("channel") or "")
+        channel_input = channel or (url_channel if url_parent else "") or recorded
+        parsed_channel, _, _ = slack.parse_target(channel_input)
+        target = slack.resolve_target(conf.bot_token, parsed_channel, conf.channel)
+        # attach 는 게시를 하지 않으므로(label 을 안 바꾸면 API 호출이 아예 없다)
+        # 접근 못 하는 채널에도 "붙었습니다" 를 돌려줄 수 있었다. 쓰기 검증이 0인
+        # 성공은 없는 것이 낫다 — 여기서 가입 여부만 먼저 본다.
+        slack.assert_member(conf.bot_token, target)
+        c = chatmod.attach(conf.bot_token, actual_thread, target, hours, label)
     except (chatmod.NoChat, slack.SlackError) as e:
         return f"붙지 못했습니다.\n{e}"
 
