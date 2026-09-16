@@ -193,6 +193,11 @@ def chat_update(token: str, channel: str, ts: str, text: str) -> dict:
     return api(token, "chat.update", {"channel": channel, "ts": ts, "text": text})
 
 
+def chat_delete(token: str, channel: str, ts: str) -> dict:
+    """이미 보낸 내 메시지를 지운다."""
+    return api(token, "chat.delete", {"channel": channel, "ts": ts})
+
+
 def conversations_info(token: str, channel: str) -> dict:
     return api(token, "conversations.info", {"channel": channel}, form=True)
 
@@ -271,6 +276,38 @@ def my_conversations(token: str) -> list[dict]:
     ]
 
 
+def parse_target(text: str) -> tuple[str, str | None, str | None]:
+    """Slack URL을 ``(channel, message_ts, parent_ts)`` 로 나눈다.
+
+    URL이 아니면 기존 목적지 표기(ID, #이름, 빈 문자열)를 그대로 돌려준다.
+    Slack의 ``p1789541759492109`` 표기는 뒤에서 여섯 자리 앞에 점을 찍으면 ts다.
+
+    답글 URL에는 서로 다른 두 ts가 있다. p...는 링크한 메시지 자신이고 query의
+    thread_ts는 부모다. 삭제·수정은 전자를, 대화 목적지는 후자를 써야 한다.
+    하나로 합치면 답글을 지울 때 부모 스레드를 지우거나, 대화를 답글 아래의 새
+    스레드로 갈라놓게 되므로 둘을 따로 돌려준다.
+    """
+    target = (text or "").strip()
+    parsed = urllib.parse.urlparse(target)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc.lower().endswith(".slack.com"):
+        return target, None, None
+
+    match = re.fullmatch(r"/archives/([CDG][A-Z0-9]+)(?:/p(\d{7,}))?/?", parsed.path)
+    if not match:
+        return target, None, None
+
+    channel, compact_ts = match.groups()
+    message_ts = (
+        f"{compact_ts[:-6]}.{compact_ts[-6:]}" if compact_ts else None
+    )
+    query_ts = urllib.parse.parse_qs(parsed.query).get("thread_ts", [""])[0].strip()
+    if query_ts:
+        return channel, message_ts, query_ts
+    # 쿼리가 없는 p...는 부모 메시지 또는 단독 메시지다. 목적지 계열에서도
+    # 이 메시지를 쓸 수 있도록 parent_ts 자리에 같은 값을 넣는다.
+    return channel, message_ts, message_ts
+
+
 def resolve_target(token: str, target: str, default: str) -> str:
     """사람이 적은 목적지를 대화 ID 로 바꾼다.
 
@@ -293,4 +330,36 @@ def resolve_target(token: str, target: str, default: str) -> str:
     raise SlackError(
         "channel_not_found", "resolve_target",
         f"'{t}' 을 찾지 못했습니다. 봇이 들어가 있는 채널: {known}",
+    )
+
+
+def assert_member(token: str, channel: str) -> None:
+    """게시하기 전에 봇이 그 채널에 들어가 있는지 확인한다.
+
+    `#이름` 으로 적으면 resolve_target 이 가입한 채널 목록에서 찾으므로 이 검사가
+    이미 끝나 있다. 그런데 `C...` 를 그대로 넘기면 그 경로를 건너뛰어, 못 들어간
+    채널이라는 사실이 첫 게시의 `not_in_channel` 로야 드러난다.
+
+    옮기기처럼 **옛 스레드를 닫고 나서** 여는 동작에서는 그 시점에 이미 돌아갈
+    곳이 없다. 그래서 닫기 전에 여기서 걸러낸다. DM(D...) 은 초대 개념이 없어
+    확인할 것이 없다.
+    """
+    if not channel or channel[0] not in "CG":
+        return
+    try:
+        joined = my_conversations(token)
+    except SlackError as e:
+        # 스코프가 없어 목록을 못 받는 설치도 있다(users.conversations 는
+        # channels:read/groups:read 를 요구한다). 그때는 "확인 불가" 지 "부재" 가
+        # 아니므로 막지 않는다 — 막으면 지금 잘 되던 게시까지 끊긴다.
+        if e.code in ("missing_scope", "not_allowed_token_type"):
+            return
+        raise
+    if any(c["id"] == channel for c in joined):
+        return
+    known = ", ".join("#" + c["name"] for c in joined) or "(없음)"
+    raise SlackError(
+        "not_in_channel", "assert_member",
+        f"봇이 {channel} 에 들어가 있지 않습니다.\n"
+        f"들어가 있는 채널: {known}",
     )
