@@ -33,11 +33,19 @@ DOWN_GRACE = 60.0         # 이 상태가 이만큼 이어져야 알린다 — �
 LISTEN_CHECK = 30.0       # 수신자 확인(lsof)은 이 간격으로만 — 매 주기 돌릴 일이 아니다
 DEFAULT_HOURS = 10.0    # 하루 일과를 덮는 길이. 짧으면 자꾸 끊겨 되레 성가시다.
 
-# 닫혔어도 다시 붙을 수 있는 사유. 사람의 뜻과 무관하게 끊긴 것만 연다 — 폰에서
-# `닫기` 한 것, 세션이 닫기를 부른 것, 마감이 지난 것은 끝난 대화다. 새 기록은
-# close_thread 가 resumable 로 남기므로, 이 목록은 그 필드가 생기기 전에 닫힌
-# 기록을 읽을 때만 쓴다.
-_RESUMABLE_REASONS = ("Claude 세션 종료", "대화를 다른 곳으로 옮겼습니다")
+# 마감이 지났는데 Slack 에 닫힘 통보가 안 닿으면 이만큼은 닫기를 미루고 다시 시도한다.
+# 밤새 Wi-Fi 가 16분마다 잠깐씩만 열리던 날(2026-09-17) 예고도 🔒 도 전부 버려져,
+# 폰에서는 스레드가 말없이 죽은 것으로 보였다. 창이 한 번은 열릴 만큼 기다리되
+# 영원히 붙잡지는 않는다.
+CLOSE_NOTICE_GRACE = 30 * 60
+
+# 닫혔어도 다시 붙을 수 있는 사유. 사람의 뜻으로 끝낸 것만 끝이다 — 폰에서 `닫기`
+# 한 것과 세션이 닫기를 부른 것. 세션 사망·옮기기는 물론이고 마감도 연다. 마감은
+# 방치된 스레드가 영원히 남지 않게 하는 상한이지, 살아 있는 세션이 명시적으로
+# 돌아오는 것까지 막는 문이 아니다 — 막았더니 상태 파일을 손으로 고쳐 돌아왔다
+# (2026-09-17). 새 기록은 close_thread 가 resumable 로 남기므로, 이 목록은 그
+# 필드가 생기기 전에 닫힌 기록을 읽을 때만 쓴다.
+_RESUMABLE_REASONS = ("Claude 세션 종료", "대화를 다른 곳으로 옮겼습니다", "마감 시각 도달")
 
 
 def resumable(state: dict) -> bool:
@@ -368,16 +376,19 @@ def extend(token: str, hours: float) -> Chat:
 
 def close_thread(
     token: str, channel: str, thread_ts: str, label: str, reason: str,
-    resumable: bool = False,
+    resumable: bool = False, only_if_notified: bool = False,
 ) -> bool:
-    """스레드를 닫는다 — 지우지 않고 표시만 남긴다.
+    """스레드를 닫는다 — 지우지 않고 표시만 남긴다. 돌려주는 값은 통보가 닿았는지다.
 
     머리글에 취소선을 긋는 이유: 답글로만 "닫혔다" 고 적으면 스레드를 펼쳐야
     알 수 있다. 머리글이 그어져 있으면 대화 목록에서 바로 보인다.
 
     resumable 은 나중에 attach 로 다시 열어도 되는지다. 기본은 닫힘이 끝이고,
-    세션 사망·옮기기처럼 사람이 끝내지 않은 경로만 True 를 넘긴다. 사유 문구로
+    사람이 끝내지 않은 경로(세션 사망·옮기기·마감)만 True 를 넘긴다. 사유 문구로
     판정하지 않는 이유는 문구가 바뀌는 순간 판정이 조용히 깨지기 때문이다.
+
+    only_if_notified 는 통보가 하나라도 안 닿았으면 닫지 않고 False 로 돌아온다.
+    부르는 쪽이 다음 주기에 다시 시도할 수 있을 때(지킴이의 마감 처리) 쓴다.
     """
     stamp = time.strftime("%H:%M")
     notified = True
@@ -396,8 +407,10 @@ def close_thread(
         )
     except slack.SlackError:
         # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
-        # 있는 쪽이 나쁘다.
+        # 있는 쪽이 나쁘다 — 단, 다시 시도할 주체가 있으면 그쪽에 맡긴다.
         notified = False
+    if only_if_notified and not notified:
+        return False
     slack.set_session_status(token, channel, thread_ts, "closed")
     threads.patch(
         thread_ts, closed=True, closed_at=time.time(), reason=reason, resumable=resumable
@@ -531,7 +544,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
             chat.warned = bool(state.get("warned"))
 
         if chat.remaining <= 0:
-            close_chat(token, "마감 시각 도달")
+            close_chat(token, "마감 시각 도달", resumable=True)
             return "closed", []
 
         if not chat.warned and chat.remaining <= WARN_LEAD:
