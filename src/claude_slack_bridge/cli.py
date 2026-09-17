@@ -29,6 +29,26 @@ MANIFEST_NAME = "slack-app-manifest.yaml"
 # 대신 받았다고 알리고 표시를 내린다.
 ACK_DELAY = 30.0
 
+# Slack 이 계속 안 닿을 때 지킴이 로그에 그 사실을 다시 적는 간격. 첫 실패와 복귀는
+# 즉시 적고, 그 사이는 이 간격으로만 — 5초마다 적으면 로그가 그것뿐이 된다.
+UNREACHABLE_LOG_EVERY = 10 * 60
+
+
+def _log(line: str) -> None:
+    """지킴이 로그 한 줄. 시각을 앞에 붙인다.
+
+    지킴이 로그는 사후에 "그때 무슨 일이 있었나" 를 가리는 유일한 기록인데, 시각이
+    없으면 순서만 남는다 — 밤새 닫힌 스레드의 로그가 `DEADLINE_CLOSED` 한 줄이라
+    Wi-Fi 로그와 대조해서야 경위를 알았다(2026-09-17). 표식은 그대로 두고 앞에
+    시각만 더한다. 읽는 것은 사람뿐이다.
+    """
+    print(f"{time.strftime('%m-%d %H:%M:%S')} {line}", flush=True)
+
+
+def _span(seconds: float) -> str:
+    """지난 시간. fmt_remaining 은 남은 시간용이라 1분 미만을 "곧" 으로 쓴다."""
+    return chat.fmt_remaining(seconds) if seconds >= 60 else f"{int(seconds)}초"
+
 
 def _die(msg: str) -> None:
     print(msg, file=sys.stderr)
@@ -581,9 +601,12 @@ def cmd_keeper(argv: list[str]) -> None:
             )
         pending: list[float] = []   # 텍스트 수신확인을 보낼지 유예 중인 메시지들
         health: dict = {}           # 세션 생존 판정의 확인 간격 캐시
+        unreachable_since = 0.0     # Slack 이 안 닿기 시작한 시각. 0 이면 정상
+        unreachable_logged = 0.0
+        close_deferred = False      # 마감 통보를 못 전해 닫기를 미루는 중인지
         while True:
             if parent and not _pid_alive(int(parent)):
-                print("PARENT_GONE")
+                _log("PARENT_GONE")
                 current = threads.load(thread) or state
                 if current.get("closed"):
                     threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -598,13 +621,13 @@ def cmd_keeper(argv: list[str]) -> None:
                 if not chat.close_thread(
                     conf.bot_token, channel, thread, label, reason, resumable=True,
                 ):
-                    print("PARENT_CLOSE_FAILED")
+                    _log("PARENT_CLOSE_FAILED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
 
             state = threads.load(thread) or state
             if state.get("closed"):
-                print("CLOSED")
+                _log("CLOSED")
                 threads.append_inbox_event(thread, "THREAD_CLOSED")
                 return
             # channels.json은 작고 listener 변경은 드물다. 캐시 무효화 복잡성을
@@ -625,10 +648,24 @@ def cmd_keeper(argv: list[str]) -> None:
             remaining = deadline - time.time()
 
             if remaining <= 0:
-                chat.close_thread(conf.bot_token, channel, thread, label, "마감 시각 도달")
-                print("DEADLINE_CLOSED")
-                threads.append_inbox_event(thread, "THREAD_CLOSED")
-                return
+                # 통보가 안 닿으면 바로 닫지 않는다. 밤새 Wi-Fi 가 16분마다 잠깐씩만
+                # 열리던 날 예고도 🔒 도 전부 버려져 폰에서는 스레드가 말없이 죽은
+                # 것으로 보였다(2026-09-17). 유예 안에서는 다음 주기에 다시 시도하고,
+                # 유예가 끝나면 통보 없이라도 닫는다 — 영원히 붙잡지는 않는다.
+                final = -remaining >= chat.CLOSE_NOTICE_GRACE
+                closed = chat.close_thread(
+                    conf.bot_token, channel, thread, label, "마감 시각 도달",
+                    resumable=True, only_if_notified=not final,
+                )
+                if closed or final:
+                    _log("DEADLINE_CLOSED" if closed else "DEADLINE_CLOSED\t통보 못 함")
+                    threads.append_inbox_event(thread, "THREAD_CLOSED")
+                    return
+                if not close_deferred:
+                    close_deferred = True
+                    _log("DEADLINE_NOTICE_PENDING\tSlack 에 닿지 않아 닫기를 미룬다")
+                time.sleep(interval)
+                continue
 
             if not state.get("warned") and remaining <= chat.WARN_LEAD:
                 try:
@@ -641,11 +678,28 @@ def cmd_keeper(argv: list[str]) -> None:
 
             try:
                 msgs = slack.conversations_replies(conf.bot_token, channel, thread)
-            except slack.SlackError:
+            except slack.SlackError as e:
                 # 지킴이는 어지간해서는 죽지 않아야 한다. 죽으면 Esc 뒤에 폰이
                 # 완전한 침묵이 되고, 그때는 확인할 방법도 함께 사라진다.
+                #
+                # 대신 안 닿는다는 사실은 남긴다. 이 아래의 예고·⚠️·🔒 는 전부
+                # Slack 이 닿아야 나가는데, 조용히 넘기면 밤새 아무것도 안 나간
+                # 이유를 사후에 가릴 길이 없다.
+                now = time.time()
+                if not unreachable_since:
+                    unreachable_since = unreachable_logged = now
+                    _log(f"SLACK_UNREACHABLE\t{e}".replace("\n", " "))
+                elif now - unreachable_logged >= UNREACHABLE_LOG_EVERY:
+                    unreachable_logged = now
+                    _log(
+                        f"SLACK_UNREACHABLE\t{_span(now - unreachable_since)} 째\t{e}"
+                        .replace("\n", " ")
+                    )
                 time.sleep(interval)
                 continue
+            if unreachable_since:
+                _log(f"SLACK_BACK\t{_span(time.time() - unreachable_since)} 만에")
+                unreachable_since = 0.0
 
             fresh = [
                 m for m in msgs
@@ -664,7 +718,7 @@ def cmd_keeper(argv: list[str]) -> None:
                         cmd[0], cmd[1], command_state,
                         str(m.get("user") or ""), owner_id,
                     ):
-                        print("CLOSED_BY_USER")
+                        _log("CLOSED_BY_USER")
                         threads.append_inbox_event(thread, "THREAD_CLOSED")
                         return
                     seen = message_ts
@@ -799,7 +853,7 @@ def _health_target(
     try:
         return slack.conversations_open(token, owner_id), None
     except slack.SlackError:
-        print("HEALTH_DM_FAILED")
+        _log("HEALTH_DM_FAILED")
         return channel, thread
 
 
@@ -888,7 +942,7 @@ def _check_session_health(
         # "작업 중" 이 켜진 채 ⚠️ 가 나가면 표시가 거짓말이 된다. suspended 는
         # 아무것도 그리지 않지만 상태만은 사실과 맞춘다.
         slack.set_session_status(token, channel, thread, "suspended")
-        print(f"SESSION_DOWN\t{reason}")
+        _log(f"SESSION_DOWN\t{reason}")
         return
 
     if not down_since:
@@ -907,7 +961,7 @@ def _check_session_health(
         except slack.SlackError:
             return
         slack.set_session_status(token, channel, thread, "active")
-        print("SESSION_BACK")
+        _log("SESSION_BACK")
     _safe_patch(thread, down_since=None, down_alerted=False)
 
 
