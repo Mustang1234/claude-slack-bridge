@@ -318,15 +318,20 @@ def parse_target(text: str) -> tuple[str, str | None, str | None]:
 def resolve_target(token: str, target: str, default: str) -> str:
     """사람이 적은 목적지를 대화 ID 로 바꾼다.
 
-    받는 형태는 셋이다: 빈 값(기본값 사용) · 대화 ID(C.../D...) · #채널명.
+    받는 형태는 넷이다: 빈 값(기본값 사용) · 대화 ID(C.../D...) · #채널명 · 사람 ID(U...).
     이름으로 적을 수 있어야 하는 이유는, 채널 ID 를 외우고 있는 사람이 없기
-    때문이다.
+    때문이다. 사람 ID 를 받는 이유는 "동료에게 DM" 이 흔한 요청인데 세션이 아는 것은
+    그 사람이지 DM 방이 아니기 때문이다 — 방은 여기서 연다(`im:write`).
     """
     t = (target or "").strip()
     if not t:
         return default
     if t[0] in "CDG" and " " not in t and t.upper() == t:
         return t
+    # 사람 ID 로도 적을 수 있다. 세션이 아는 것은 "누구에게" 이지 "어느 DM 방" 이 아니라서,
+    # U... 를 그대로 게시하면 channel_not_found 로 막힌다 — 여기서 그 사람과의 DM 을 연다.
+    if t[0] == "U" and " " not in t and t.upper() == t:
+        return conversations_open(token, t)
 
     name = t.lstrip("#").strip()
     for conv in my_conversations(token):
@@ -336,7 +341,8 @@ def resolve_target(token: str, target: str, default: str) -> str:
     known = ", ".join("#" + c["name"] for c in my_conversations(token)) or "(없음)"
     raise SlackError(
         "channel_not_found", "resolve_target",
-        f"'{t}' 을 찾지 못했습니다. 봇이 들어가 있는 채널: {known}",
+        f"'{t}' 을 찾지 못했습니다. 봇이 들어가 있는 채널: {known}. "
+        "사람에게 DM 하려면 멤버 ID(U…)를 적는다 — 이름은 풀지 않는다.",
     )
 
 

@@ -46,8 +46,11 @@ oauth_config:
       # 채널명 -> 채널 ID 조회 (설치 편의)
       - channels:read
       - groups:read
-      # DM 으로 받고 싶을 때
+      # DM 으로 받고 싶을 때. 사람 ID(U...)로 보낼 때도 이 스코프로 DM 을 연다.
       - im:write
+      # 사람 ID·이름으로 DM 상대를 찾기. 없으면 U... 를 받아도 누구인지 확인할 수 없고,
+      # 이름으로 적은 목적지를 풀 수 없다.
+      - users:read
 
 settings:
   # 인바운드 연결을 일절 쓰지 않는다. 방화벽 뒤에서도 그대로 동작한다.
