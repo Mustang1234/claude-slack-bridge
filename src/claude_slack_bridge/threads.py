@@ -414,3 +414,35 @@ def inbox_tailed(thread_ts: str) -> bool:
 def session_listening(thread_ts: str) -> bool:
     """세션 쪽 수신자가 듣고 있는지 — 폴백 watch 또는 inbox 를 tail 하는 Monitor."""
     return watcher_alive(thread_ts) or inbox_tailed(thread_ts)
+
+
+def find_inbox_message(message_ts: str) -> dict | None:
+    """모든 스레드 inbox 에서 그 ts 의 발화 한 건을 찾는다.
+
+    바인딩을 바꾸는 지시가 누구 입에서 나왔는지 판정할 때 쓴다. 값이 아니라 발화
+    단위로 보므로, 같은 스레드 ID 가 예전에 남의 입에서 나왔다는 이유로 소유자의
+    지시를 막지 않는다.
+    """
+    target = str(message_ts).strip()
+    if not target:
+        return None
+    try:
+        paths = sorted(THREADS_DIR.glob("*.inbox.jsonl"))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or '"user"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(record.get("ts", "")) == target:
+                        return record
+        except OSError:
+            continue
+    return None
