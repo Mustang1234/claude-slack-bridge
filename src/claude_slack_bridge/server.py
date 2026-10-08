@@ -144,7 +144,7 @@ DM 으로 나간다.
 
 `핑`(지킴이 생존 확인 — 세션 생존이 아니다), `연장 3시간`, `마감 18:00`, `닫기`,
 `듣기 @사람`·`그만 @사람`·`누구 듣니`는 지킴이가 처리하고 세션을 깨우지 않는다. listener 변경은
-채널 스레드의 소유자만 할 수 있다. 이 줄들에 세션이 할 일은 없다. 기본 유지 시간은 10시간이다.
+채널 스레드의 소유자만 할 수 있다. 이 줄들에 세션이 할 일은 없다. 기본 유지 시간은 7일이다.
 
 스레드는 `init`에서 설정한 기본 목적지에 열린다. 다른 팀 채널에서 같이 봐야 하는 일이면
 `channel="#이름"`으로 지정한다. 설정이 없으면 모든 툴이 조용히 아무것도 하지 않는다.
@@ -760,12 +760,12 @@ def _startup_lines(c: chatmod.Chat, keeper_status: str) -> str:
     ),
 )
 def slack_chat_open(
-    hours: float = 10.0, label: str | None = None, channel: str | None = None
+    hours: float = 168.0, label: str | None = None, channel: str | None = None
 ) -> str:
     """대화를 연다.
 
     Args:
-        hours: 스레드를 유지할 시간. 기본 10시간.
+        hours: 스레드를 유지할 시간. 기본 7일(168시간).
         channel: 스레드를 열 곳. 생략하면 init에서 설정한 기본 목적지.
             Slack URL이면 채널 부분만 쓰고 새 스레드를 연다. 팀이 같이 봐야 하는
             일이면 "#채널명" 으로 지정한다. 채널에서는
@@ -827,7 +827,7 @@ def slack_chat_open(
 )
 def slack_chat_switch(
     target: str = "",
-    hours: float = 10.0,
+    hours: float = 168.0,
     label: str | None = None,
     channel: str | None = None,
     current_thread_ts: str = "",
@@ -847,7 +847,7 @@ def slack_chat_switch(
     Args:
         target: 옮겨 갈 곳. Slack URL, "#채널명" 또는 대화 ID. URL에 스레드가
             있으면 새로 열지 않고 그 스레드에 붙는다.
-        hours: 새 스레드를 유지할 시간. 기본 10시간.
+        hours: 새 스레드를 유지할 시간. 기본 7일(168시간).
         label: 새 스레드의 라벨. 생략하면 옛 라벨을 그대로 물려받는다.
         channel: 이전 호출과의 호환용 target 별칭. 주면 target보다 우선한다.
         current_thread_ts: 지금 쥐고 있다고 믿는 스레드 ts. 서버가 상태 파일과
