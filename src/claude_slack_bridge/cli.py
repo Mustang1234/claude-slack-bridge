@@ -195,7 +195,7 @@ TOKEN_HELP = """\
 
 
 def permission_warning() -> str:
-    """설치 마지막에 권한 두 줄을 경고한다.
+    """설치 마지막에 권한 세 줄을 경고한다.
 
     권한 분류기가 있는 하네스(Claude Code auto mode 등)에서는 이 서버의 툴이
     세션↔스레드 바인딩을 홈에 영구 기록한다는 이유로 막히고, 지킴이를 띄우는
@@ -214,10 +214,11 @@ def permission_warning() -> str:
         "  지킴이 기동이 '허가 없는 영속화' 로 분류돼 막힙니다.",
         _red("  모델은 이 권한을 스스로 추가할 수 없습니다 — 설치할 때 사람이 한 번 넣어야 합니다."),
         "",
-        "  settings.json 의 permissions.allow 에 두 줄:",
+        "  settings.json 의 permissions.allow 에 세 줄:",
         "",
         '      "mcp__claude-slack-bridge",',
-        '      "Bash(*claude-slack-bridge keeper-start*)"',
+        '      "Bash(*claude-slack-bridge keeper-start*)",',
+        '      "Bash(*claude-slack-bridge monitor --thread *)"',
         "",
         "  분류기가 없는 환경(권한을 직접 승인하는 설정)이면 지금은 넘어가도 됩니다.",
         "  막히는 증상은 attach 나 Monitor 등록이 거부되는 것으로 나타납니다.",
@@ -1000,7 +1001,7 @@ def cmd_keeper_start(argv: list[str]) -> None:
         interval=float(interval_arg) if interval_arg is not None else None,
     )
     # 살아 있는 지킴이는 위의 로컬 상태/ps 판정만으로 즉시 돌아오며 Slack API를
-    # 호출하지 않는다. Monitor가 60초마다 안전하게 부를 수 있는 경로다.
+    # 호출하지 않는다. 사람이 진단용으로 여러 번 불러도 안전한 경로다.
     if status == "THREAD_CLOSED":
         print(status)
     else:
@@ -1009,6 +1010,99 @@ def cmd_keeper_start(argv: list[str]) -> None:
         print("기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요.")
     if status in ("THREAD_CLOSED", "DIED"):
         raise SystemExit(1)
+
+
+# Monitor 의 지킴이 점검 간격. 서버의 30초 감시가 1차 층이고 이것은 2차 층이다.
+MONITOR_KEEPER_CHECK = 60.0
+MONITOR_POLL = 0.5
+
+
+def _monitor_keeper_line(thread: str) -> str | None:
+    """지킴이 점검 한 번. 세션에 알릴 줄이 없으면 None."""
+    try:
+        status, pid = threads.spawn_keeper(thread, parent_pid=None)
+    except Exception as e:
+        return f"KEEPER_REVIVE_FAILED\t{e}"
+    if status == "THREAD_CLOSED":
+        return '{"event": "THREAD_CLOSED"}'
+    if status == "ALREADY_KEEPING":
+        return None
+    if status == "KEEPING":
+        return f"KEEPER_REVIVED\tKEEPING {pid}"
+    if status == "STALE_KEEPER":
+        return (
+            f"KEEPER_REVIVE_FAILED\tSTALE_KEEPER {pid} "
+            "기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요."
+        )
+    return f"KEEPER_REVIVE_FAILED\t{status} {pid}"
+
+
+def cmd_monitor(argv: list[str]) -> None:
+    """Claude Code Monitor 툴에 넣는 수신 루프. inbox 새 줄을 그대로 흘리고 지킴이를 점검한다.
+
+    예전에는 open/attach 가 tail·trap·while·case 를 엮은 셸 스크립트를 돌려줬다.
+    권한 규칙은 복합 명령의 조각마다 맞아야 하므로 그 스크립트는 허용 규칙 한 줄로
+    덮을 수 없었고, auto mode 에서는 매 재기동이 분류기 판정에 걸렸다 — 대부분
+    통과했지만 가끔 거부돼 수신이 끊겼다(2026-10-09). 명령 하나로 만들면
+    `Bash(*claude-slack-bridge monitor --thread *)` 로 분류기를 거치지 않는다.
+
+    tail 을 자식으로 띄우지 않고 직접 읽는다. 자식을 두면 이 프로세스가 SIGKILL 로
+    죽을 때 고아 tail 이 inbox 를 계속 열어 두고, 수신자 판정(inbox_tailed)이 죽은
+    세션을 듣는 중으로 오판한다. 파일을 열어 두는 주체가 이 프로세스 하나여야 한다.
+    """
+    thread = _arg(argv, "--thread")
+    if not thread:
+        _die("--thread <스레드 ts> 가 필요합니다.")
+    inbox = threads.ensure_inbox(thread)
+
+    def emit(line: bytes) -> None:
+        # inbox 는 ensure_ascii=False 라 한글이 섞인다. tail 처럼 바이트로 흘려
+        # stdout 인코딩(로캘)에 따라 죽지 않게 한다.
+        sys.stdout.buffer.write(line + b"\n")
+        sys.stdout.buffer.flush()
+
+    def open_at_end():
+        fh = open(inbox, "rb")
+        fh.seek(0, os.SEEK_END)
+        return fh
+
+    fh = open_at_end()
+    buf = b""
+    next_check = time.monotonic() + MONITOR_KEEPER_CHECK
+    try:
+        while True:
+            chunk = fh.read()
+            if chunk:
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    emit(raw)
+            else:
+                # tail -F 처럼 파일이 바뀌거나 잘리면 다시 연다.
+                try:
+                    st = os.stat(inbox)
+                    cur = os.fstat(fh.fileno())
+                    if st.st_ino != cur.st_ino or st.st_size < fh.tell():
+                        # 새 핸들을 먼저 연다. stat 과 open 사이에 파일이 사라지면
+                        # 옛 핸들을 그대로 두고 다음 주기에 다시 본다.
+                        new = open(inbox, "rb")
+                        fh.close()
+                        fh = new
+                        buf = b""
+                except FileNotFoundError:
+                    pass
+            if time.monotonic() >= next_check:
+                next_check = time.monotonic() + MONITOR_KEEPER_CHECK
+                line = _monitor_keeper_line(thread)
+                if line is not None:
+                    emit(line.encode("utf-8"))
+                    if line.startswith('{"event": "THREAD_CLOSED"'):
+                        return
+            time.sleep(MONITOR_POLL)
+    except KeyboardInterrupt:
+        return
+    finally:
+        fh.close()
 
 
 def cmd_targets(argv: list[str]) -> None:
@@ -1082,6 +1176,9 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge keeper-start --thread <ts>
                                  지킴이를 수동 기동·진단한다. 보통은 MCP 서버가
                                  자동으로 띄우고 되살린다
+  claude-slack-bridge monitor --thread <ts>
+                                 inbox 새 줄을 흘리고 60초마다 지킴이를 점검한다.
+                                 open/attach 가 돌려주는 Claude Code Monitor 명령이다
   claude-slack-bridge targets    설정한 기본 목적지와 초대된 채널을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """
@@ -1110,6 +1207,8 @@ def main() -> None:
         cmd_keeper(argv[1:])
     elif cmd == "keeper-start":
         cmd_keeper_start(argv[1:])
+    elif cmd == "monitor":
+        cmd_monitor(argv[1:])
     elif cmd == "doctor":
         cmd_doctor(argv[1:])
     elif cmd in ("-h", "--help", "help"):

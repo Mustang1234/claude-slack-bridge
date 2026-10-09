@@ -111,7 +111,7 @@ DM 으로 나간다.
 ## 스레드를 쥐었으면 Monitor 가 떠 있어야 한다
 
 `open`·`attach` 결과가 돌려주는 Monitor 명령을 Claude Code Monitor 툴(persistent)에서
-그대로 실행한다. inbox 를 `tail -F` 하면서 60초마다 지킴이 생존을 확인해 죽었으면
+그대로 실행한다. inbox 새 줄을 흘리면서 60초마다 지킴이 생존을 확인해 죽었으면
 되살린다. **`attach` 뒤에도 반드시 새로 띄운다** — Monitor 는 앞 세션에서 물려받을 수
 없고, 없으면 폰 답장은 파일에만 쌓이고 세션은 깨어나지 않는다. 폰에서는 그것이
 "죽었나" 로 읽힌다. 불변식은 하나다: *열린 스레드가 있으면 이 세션에 Monitor 가 떠 있다.*
@@ -125,6 +125,13 @@ DM 으로 나간다.
 파일도 빌드도 건드리지 않고 그 자리에서 띄운 뒤 하던 일을 그대로 잇는다. 코드를 다 읽고,
 빌드가 끝나고, 답을 다 쓴 뒤로 미루면 그 시간 전체가 수신 공백이다(실측: 재기동을 10분 미뤄 ⚠️ 가 나갔다.
 지킴이 유예는 60초라 1분 안에 띄우면 애초에 나가지 않는다).
+
+**재기동이 권한 분류기에 거부되면 먼저 폰에 알린다.** Monitor 명령은
+`claude-slack-bridge monitor --thread <ts>` 한 줄이라 `permissions.allow` 에
+`Bash(*claude-slack-bridge monitor --thread *)` 가 있으면 분류기를 거치지 않는다. 그 규칙이
+없는 환경에서 거부되면 같은 호출을 되풀이하지 않는다 — 거부는 권한 레이어의 판정이다.
+대신 `slack_notify` 로 "수신이 끊겼다, 재기동 승인이 필요하다" 를 스레드에 남기고 사용자에게
+승인을 구한다. 폰이 아무 말 없이 끊긴 채로 남는 것이 제일 나쁘다.
 
 내려간 채 두면 잠시 뒤 지킴이가 "수신자(Monitor)가 붙어 있지
 않습니다" ⚠️ 를 올린다 — DM 스레드면 그 스레드에, 채널 스레드면 소유자 DM 으로 간다.
@@ -713,38 +720,23 @@ def _start_keeper(thread_ts: str) -> str:
 
 
 def _startup_lines(c: chatmod.Chat, keeper_status: str) -> str:
-    """세션 쪽 persistent Monitor 에 그대로 넣을 완성된 스크립트."""
-    # 여기서 만들어 둬야 tail -F 가 곧바로 파일을 물고, 지킴이의 수신자 판정이
+    """세션 쪽 persistent Monitor 에 그대로 넣을 명령."""
+    # 여기서 만들어 둬야 monitor 가 곧바로 파일을 물고, 지킴이의 수신자 판정이
     # 첫 답장 전까지 "수신자 없음" 으로 오탐하지 않는다.
-    inbox = threads.ensure_inbox(c.thread_ts)
-    keeper_start = shlex.join(
-        threads.keeper_command(c.thread_ts, subcommand="keeper-start")
-    )
-    script = (
-        f"INBOX={shlex.quote(str(inbox))}\n"
-        'tail -n 0 -F "$INBOX" &\n'
-        "TAIL_PID=$!\n"
-        "trap 'kill \"$TAIL_PID\" 2>/dev/null' EXIT\n"
-        "while sleep 60; do\n"
-        f"  out=$({keeper_start} 2>&1)\n"
-        '  case "$out" in\n'
-        "    *THREAD_CLOSED*) printf '{\"event\": \"THREAD_CLOSED\"}\\n'; exit 0 ;;\n"
-        "    *ALREADY_KEEPING*) ;;\n"
-        "    *KEEPING*) printf 'KEEPER_REVIVED\\t%s\\n' \"$(printf '%s' \"$out\" | tr '\\n' ' ')\" ;;\n"
-        "    *) printf 'KEEPER_REVIVE_FAILED\\t%s\\n' \"$(printf '%s' \"$out\" | tr '\\n' ' ')\" ;;\n"
-        "  esac\n"
-        "done"
-    )
+    threads.ensure_inbox(c.thread_ts)
+    script = shlex.join(threads.keeper_command(c.thread_ts, subcommand="monitor"))
     return (
         f"{keeper_status}\n"
-        "Claude Code Monitor 툴(persistent)에 아래 스크립트를 그대로 넣는다:\n"
+        "Claude Code Monitor 툴(persistent)에 아래 명령을 그대로 넣는다:\n"
         f"{script}\n"
-        "지킴이 기동은 서버가 하고(30초 주기), 이 스크립트의 60초 점검은 "
+        "지킴이 기동은 서버가 하고(30초 주기), 이 명령의 60초 점검은 "
         "서버가 죽었을 때의 두 번째 층이다. THREAD_CLOSED 가 오면 Monitor 를 "
         "내린다. KEEPER_REVIVE_FAILED 만 세션이 손댄다(대개 STALE_KEEPER).\n"
         "Monitor 는 30분이면 만료된다 — 만료 알림을 보는 즉시, 긴 작업 도중이어도 "
-        "도구 호출 사이에서 같은 스크립트로 다시 띄운다. 호출 한 번이라 몇 초면 끝나고 "
-        "하던 작업에 영향이 없다. 1분 넘게 비면 폰에 ⚠️ 가 나간다."
+        "도구 호출 사이에서 같은 명령으로 다시 띄운다. 호출 한 번이라 몇 초면 끝나고 "
+        "하던 작업에 영향이 없다. 1분 넘게 비면 폰에 ⚠️ 가 나간다. "
+        "재기동이 권한 분류기에 거부되면 같은 호출을 되풀이하지 말고, slack_notify 로 "
+        "수신이 끊겼다고 알린 뒤 사용자에게 승인을 구한다."
     )
 
 

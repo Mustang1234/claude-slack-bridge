@@ -58,6 +58,7 @@ claude mcp add claude-slack-bridge -s user -- \
 | `token-help` | Bot User OAuth Token 받는 법 출력 |
 | `targets` | 설정한 기본 목적지와 봇이 들어간 채널 확인 |
 | `keeper-start --thread <ts>` | 지킴이 수동 기동·진단 (보통은 MCP 서버가 자동 기동) |
+| `monitor --thread <ts>` | inbox 새 줄을 흘리고 60초마다 지킴이 점검 (Claude Code Monitor 툴에 넣는 명령) |
 | `watch --thread <ts>` | tmux·Claude 밖에서 쓰는 폴백 감시자 |
 | `doctor` | 현재 설정이 살아있는지 점검 |
 
@@ -116,15 +117,24 @@ Slack을 읽는 지킴이와 세션을 깨우는 Monitor가 역할을 나눈다.
 | **Monitor** (persistent) | Claude Code | **안 죽음** | inbox 새 줄마다 세션 깨움 |
 
 `slack_chat_open`이나 `slack_chat_attach`가 지킴이를 직접 띄우고, MCP 서버 안의 감시
-스레드가 30초마다 죽었는지 확인해 되살린다. 두 툴은 inbox를 tail하면서 60초마다
-`keeper-start`로 지킴이를 점검하는 완성된 셸 스크립트도 돌려준다. 그 스크립트를 그대로
-Claude Code Monitor 툴(persistent)에 넣는다.
+스레드가 30초마다 죽었는지 확인해 되살린다. 두 툴은 inbox 새 줄을 흘리면서 60초마다
+지킴이를 점검하는 `claude-slack-bridge monitor --thread <ts>` 명령도 돌려준다. 그 명령을
+그대로 Claude Code Monitor 툴(persistent)에 넣는다.
 
 Monitor는 stdout 한 줄마다 세션을 깨우며 이벤트마다 끝나지 않는다. 서버의 30초 감시가
 첫 번째 복구 층이고, Monitor의 60초 점검은 서버까지 죽었을 때 지킴이를 되살리는 두 번째
 층이다. `KEEPER_REVIVED`는 복구 완료 알림이고, 세션이 손댈 것은
 `KEEPER_REVIVE_FAILED`뿐이다(대개 `STALE_KEEPER`). 스레드가 닫히면 inbox 또는 점검
-스크립트가 `{"event": "THREAD_CLOSED"}`를 출력하므로 그때 Monitor를 내린다.
+명령이 `{"event": "THREAD_CLOSED"}`를 출력하므로 그때 Monitor를 내린다.
+
+Monitor는 30분마다 만료돼 다시 띄워야 하는데, auto mode처럼 권한 분류기가 있는 환경에서는
+그 재기동이 가끔 거부돼 수신이 끊긴다. 명령이 한 줄이므로 `permissions.allow`에
+`Bash(*claude-slack-bridge monitor --thread *)`를 넣어 두면 분류기를 거치지 않는다
+(Monitor 명령에는 Bash 권한 규칙이 그대로 적용된다). auto mode 분류기는 사용자 전역
+`~/.claude/settings.json`의 규칙을 보므로 거기에 넣는다. 같은 venv에 console script가 없어
+`python -m claude_slack_bridge monitor …` 형태로 나오거나 venv 경로에 공백이 있어 따옴표가 붙으면
+이 패턴에 맞지 않으니, 그때는 open/attach가 돌려준 명령에 맞춰 규칙을 적는다. 규칙이 없는데 거부되면 세션은
+같은 호출을 되풀이하지 않고 폰에 수신이 끊겼다고 알린 뒤 승인을 구한다.
 
 지킴이는 Slack 답장을 append-only inbox에 먼저 저장하므로 Monitor가 잠시 내려가도
 **메시지를 잃지는 않는다.** 세션이 끝나면 지킴이가 부모의 죽음을 확인해 Slack
