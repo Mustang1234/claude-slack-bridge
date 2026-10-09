@@ -134,7 +134,7 @@ def ensure_inbox(thread_ts: str) -> Path:
     """inbox 파일을 미리 만들어 둔다(멱등).
 
     수신자 판정(inbox_tailed)은 이 파일을 열어 둔 프로세스로 하는데, 파일이
-    없으면 tail -F 는 재시도만 하며 열지 않는다. 첫 답장이 오기 전까지 Monitor
+    없으면 리더(monitor·tail -F)가 열 것이 없다. 첫 답장이 오기 전까지 Monitor
     가 멀쩡히 붙어 있어도 "수신자 없음" 으로 보이던 것이 그 때문이다. 경로를
     세션에 넘기는 순간(open/attach)과 지킴이 기동 때 빈 파일로 만들어, 파일
     부재가 판정에 섞이지 않게 한다.
@@ -307,7 +307,7 @@ def inbox_keeper_alive(thread_ts: str) -> bool:
 
 def keeper_command(thread_ts: str, *, subcommand: str = "keeper") -> list[str]:
     """같은 venv의 브리지 CLI로 지킴이 명령을 만드는 공용 규칙."""
-    if subcommand not in ("keeper", "keeper-start"):
+    if subcommand not in ("keeper", "keeper-start", "monitor"):
         raise ValueError(f"지원하지 않는 지킴이 명령입니다: {subcommand}")
     # MCP 서버의 argv[0]은 uvx나 다른 래퍼일 수 있으므로 같은 venv의 console
     # script를 찾는다. 없을 때만 -m으로 재진입하며 _proc_is는 양쪽 표기를 받는다.
