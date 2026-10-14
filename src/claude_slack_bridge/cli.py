@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import re
 import shutil
@@ -1069,19 +1070,19 @@ def _monitor_keeper_line(thread: str) -> str | None:
     try:
         status, pid = threads.spawn_keeper(thread, parent_pid=None)
     except Exception as e:
-        return f"KEEPER_REVIVE_FAILED\t{e}"
+        return f"KEEPER_REVIVE_FAILED\t{e}\tthread={thread}"
     if status == "THREAD_CLOSED":
         return '{"event": "THREAD_CLOSED"}'
     if status == "ALREADY_KEEPING":
         return None
     if status == "KEEPING":
-        return f"KEEPER_REVIVED\tKEEPING {pid}"
+        return f"KEEPER_REVIVED\tKEEPING {pid}\tthread={thread}"
     if status == "STALE_KEEPER":
         return (
             f"KEEPER_REVIVE_FAILED\tSTALE_KEEPER {pid} "
-            "기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요."
+            f"기존 지킴이 프로세스를 끝낸 뒤 keeper-start 를 다시 실행하세요.\tthread={thread}"
         )
-    return f"KEEPER_REVIVE_FAILED\t{status} {pid}"
+    return f"KEEPER_REVIVE_FAILED\t{status} {pid}\tthread={thread}"
 
 
 def cmd_monitor(argv: list[str]) -> None:
@@ -1105,6 +1106,13 @@ def cmd_monitor(argv: list[str]) -> None:
     def emit(line: bytes) -> None:
         # inbox 는 ensure_ascii=False 라 한글이 섞인다. tail 처럼 바이트로 흘려
         # stdout 인코딩(로캘)에 따라 죽지 않게 한다.
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            record = None
+        if isinstance(record, dict):
+            record["thread_ts"] = thread
+            line = json.dumps(record, ensure_ascii=False).encode("utf-8")
         sys.stdout.buffer.write(line + b"\n")
         sys.stdout.buffer.flush()
 

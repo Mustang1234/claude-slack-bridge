@@ -82,8 +82,18 @@ def attach(
     기록이 있으면 마감·라벨을 그대로 이어받고, 없으면(영속화 이전에 열린
     스레드) 지금 기준으로 새로 만든다.
     """
-    global _chat
     state = threads.load(thread_ts) or {}
+    if thread_ts in _chats and not state.get("closed"):
+        chat = _chats[thread_ts]
+        if label:
+            chat.label = label
+            chat.header = header_text(label, chat.deadline)
+            threads.patch(thread_ts, label=label)
+            try:
+                slack.chat_update(token, chat.channel, thread_ts, chat.header)
+            except slack.SlackError:
+                pass
+        return _remember(chat)
     reopening = bool(state.get("closed"))
     if not resumable(state):
         reason = str(state.get("reason") or "").split("\n")[0]
@@ -105,7 +115,7 @@ def attach(
         # 지킴이가 뜨자마자 "마감 시각 도달" 로 다시 닫는다.
         deadline = time.time() + DEFAULT_HOURS * 3600
 
-    _chat = Chat(
+    chat = Chat(
         channel=channel,
         thread_ts=thread_ts,
         deadline=deadline,
@@ -151,7 +161,7 @@ def attach(
             # 머리글 갱신에 실패해도 붙기와 라벨 영속화는 끝난 상태다. 표시가
             # 어긋나는 것보다 세션이 스레드에 붙지 못하는 쪽이 더 나쁘다.
             pass
-    return _chat
+    return _remember(chat)
 
 
 def open_threads() -> list[dict]:
@@ -183,18 +193,50 @@ class Chat:
         return self.deadline - time.time()
 
 
-# 이 프로세스 = 이 Claude 세션. 그래서 전역 하나로 충분하다.
+# 삽입 순서는 마지막 open/attach 순서이고, _chat은 그중 기본 스레드다.
 _chat: Chat | None = None
+_chats: dict[str, Chat] = {}
+
+
+def _remember(chat: Chat) -> Chat:
+    global _chat
+    _chats.pop(chat.thread_ts, None)
+    _chats[chat.thread_ts] = chat
+    _chat = chat
+    return chat
 
 
 class NoChat(RuntimeError):
     pass
 
 
-def current() -> Chat:
-    if _chat is None:
-        raise NoChat("열린 대화가 없습니다. 먼저 대화를 여세요.")
-    return _chat
+def forget(thread_ts: str) -> None:
+    """연결을 잊고, 기본이었다면 닫히지 않은 최근 연결로 돌아간다."""
+    global _chat
+    _chats.pop(thread_ts, None)
+    if _chat is None or _chat.thread_ts != thread_ts:
+        return
+    _chat = None
+    for ts, candidate in reversed(tuple(_chats.items())):
+        if (threads.load(ts) or {}).get("closed"):
+            _chats.pop(ts, None)
+        elif _chat is None:
+            _chat = candidate
+
+
+def current(thread_ts: str | None = None) -> Chat:
+    if thread_ts is not None:
+        if thread_ts not in _chats:
+            raise NoChat(f"이 세션이 쥔 스레드가 아닙니다: {thread_ts}")
+        chat = _chats[thread_ts]
+    else:
+        if _chat is None:
+            raise NoChat("열린 대화가 없습니다. 먼저 대화를 여세요.")
+        chat = _chat
+    if (threads.load(chat.thread_ts) or {}).get("closed"):
+        forget(chat.thread_ts)
+        raise NoChat(f"이미 닫힌 스레드입니다: {chat.thread_ts}")
+    return chat
 
 
 def fmt_remaining(seconds: float) -> str:
@@ -324,15 +366,14 @@ def header_text(label: str, deadline: float) -> str:
 def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat:
     """대화를 열어 이 세션에 묶는다.
 
-    스레드 하나가 세션 하나다. ntfy 의 슬롯 여덟 개가 하던 일을 스레드가 하되,
+    세션은 스레드를 여러 개 쥘 수 있다. 스레드는
     개수 제한이 없으므로 미리 만들어 둘 것도 반납할 것도 없다.
     """
-    global _chat
     head = label or "Claude 세션"
     deadline = time.time() + hours * 3600
     res = slack.post_message(token, channel, header_text(head, deadline))
 
-    _chat = Chat(
+    chat = Chat(
         channel=channel,
         thread_ts=res["ts"],
         deadline=deadline,
@@ -341,9 +382,9 @@ def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat
     )
     # 이 ts 는 방금 Slack 이 돌려줘 아직 다른 프로세스가 알 수 없다. 기존 상태를
     # 갱신하는 attach 와 달리 경쟁할 writer 가 없는 최초 생성이라 직접 save 한다.
-    threads.save(_chat.thread_ts, {
+    threads.save(chat.thread_ts, {
         "channel": channel,
-        "thread_ts": _chat.thread_ts,
+        "thread_ts": chat.thread_ts,
         "label": head,
         "deadline": deadline,
         "warned": False,
@@ -354,12 +395,12 @@ def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat
         # 사본을 두면 사본을 안 채우는 경로(attach)에서 주인이 비어 버린다.
         "owner_missing_warned": False,
     })
-    return _chat
+    return _remember(chat)
 
 
-def extend(token: str, hours: float) -> Chat:
+def extend(token: str, hours: float, thread_ts: str | None = None) -> Chat:
     """마감을 미룬다. 머리글의 마감 시각도 같이 고쳐 쓴다."""
-    chat = current()
+    chat = current(thread_ts)
     chat.deadline = max(chat.deadline, time.time()) + hours * 3600
     chat.warned = False
     threads.patch(chat.thread_ts, deadline=chat.deadline, warned=False)
@@ -420,15 +461,19 @@ def close_thread(
     return notified
 
 
-def close_chat(token: str, reason: str = "작업이 끝났습니다", resumable: bool = False) -> None:
+def close_chat(
+    token: str, reason: str = "작업이 끝났습니다", resumable: bool = False,
+    thread_ts: str | None = None,
+) -> None:
     global _chat
-    if _chat is None:
+    if thread_ts is None and _chat is None:
         return
+    chat = current(thread_ts)
     close_thread(
-        token, _chat.channel, _chat.thread_ts, _chat.label or "Claude 세션", reason,
+        token, chat.channel, chat.thread_ts, chat.label or "Claude 세션", reason,
         resumable=resumable,
     )
-    _chat = None
+    forget(chat.thread_ts)
 
 
 def warn_text(remaining: float) -> str:
@@ -524,7 +569,7 @@ def poll_new(token: str, chat: Chat) -> list[dict]:
     return fresh
 
 
-def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[dict]]:
+def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | None = None) -> tuple[str, list[dict]]:
     """답장이 올 때까지 블로킹한다.
 
     반환하는 상태는 셋이다.
@@ -532,7 +577,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
       timeout  — 이번 대기 시간 안에는 안 왔다 (스레드는 그대로 살아있다)
       closed   — 마감이 지나 스레드가 닫혔다
     """
-    chat = current()
+    chat = current(thread_ts)
     until = time.time() + timeout
     fails = 0
 
@@ -546,7 +591,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
             chat.warned = bool(state.get("warned"))
 
         if chat.remaining <= 0:
-            close_chat(token, "마감 시각 도달", resumable=True)
+            close_chat(token, "마감 시각 도달", resumable=True, thread_ts=chat.thread_ts)
             return "closed", []
 
         if not chat.warned and chat.remaining <= WARN_LEAD:
@@ -578,7 +623,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float) -> tuple[str, list[
         if fresh:
             if chat.warned:
                 # 예고 창 안에 답이 왔다 = 자리에 있다는 신호다.
-                extend(token, AUTO_EXTEND_HOURS)
+                extend(token, AUTO_EXTEND_HOURS, thread_ts=chat.thread_ts)
             return "messages", fresh
 
         if now >= until:
