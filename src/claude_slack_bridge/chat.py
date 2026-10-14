@@ -234,6 +234,7 @@ def parse_command(text: str):
     자리를 비운 사람이 마감을 바꾸려고 터미널로 돌아와야 한다면 그건 바꿀 수
     없는 것이나 마찬가지다. 스레드에 한 줄 적는 것으로 되어야 한다.
 
+    반환값은 (kind, value, scope)이며 listener 변경 외에는 scope가 None이다.
     명령만 적힌 줄일 때만 명령으로 친다. "연장해줘 그리고 이것도 봐줘" 처럼
     말이 섞이면 그건 나에게 하는 말이므로 그대로 전달한다.
     """
@@ -242,40 +243,40 @@ def parse_command(text: str):
         return None
 
     if t in ("핑", "ping", "살아있어?", "살아있니?", "?"):
-        return ("ping", None)
+        return ("ping", None, None)
 
     for kind, words in (("listen", ("듣기", "listen")), ("unlisten", ("그만", "unlisten"))):
-        m = re.fullmatch(rf"(?:{'|'.join(words)})\s+(.+)", t)
+        m = re.fullmatch(rf"(?:(채널|channel)\s*)?(?:{'|'.join(words)})\s+(.+)", t)
         if not m:
             continue
-        mentions = re.findall(r"<@(U[A-Z0-9]+)(?:\|[^>]+)?>", m.group(1))
-        remainder = re.sub(r"<@U[A-Z0-9]+(?:\|[^>]+)?>", "", m.group(1))
+        mentions = re.findall(r"<@(U[A-Z0-9]+)(?:\|[^>]+)?>", m.group(2))
+        remainder = re.sub(r"<@U[A-Z0-9]+(?:\|[^>]+)?>", "", m.group(2))
         if mentions and not remainder.strip():
             # 같은 사람을 두 번 적어도 상태에는 한 번만 남긴다.
-            return (kind, list(dict.fromkeys(mentions)))
+            return (kind, list(dict.fromkeys(mentions)), "channel" if m.group(1) else "thread")
 
     if t in ("누구 듣니", "누구 들어", "listeners"):
-        return ("listeners", None)
+        return ("listeners", None, None)
 
     # "그만" 은 닫기 별칭에서 뺐다. "그만 @사람" 이 listener 해제 명령이 되면서,
     # 멘션을 빠뜨린 "그만" 한 마디가 스레드를 닫아 버리는 사고가 생기기 때문이다.
     if t in ("닫기", "종료", "닫아"):
-        return ("close", None)
+        return ("close", None, None)
 
     m = re.fullmatch(r"마감\s*(\d{1,2}):(\d{2})", t)
     if m:
-        return ("until", (int(m.group(1)), int(m.group(2))))
+        return ("until", (int(m.group(1)), int(m.group(2))), None)
 
     m = re.fullmatch(r"(?:연장\s*)?(\d+(?:\.\d+)?)\s*시간(?:\s*연장)?", t)
     if m:
-        return ("extend", float(m.group(1)))
+        return ("extend", float(m.group(1)), None)
 
     if t in ("연장", "연장해", "연장해줘"):
-        return ("extend", AUTO_EXTEND_HOURS)
+        return ("extend", AUTO_EXTEND_HOURS, None)
 
     m = re.fullmatch(r"(?:연장\s*)?(\d+)\s*분(?:\s*연장)?", t)
     if m:
-        return ("extend", int(m.group(1)) / 60)
+        return ("extend", int(m.group(1)) / 60, None)
 
     return None
 
@@ -413,7 +414,8 @@ def close_thread(
         return False
     slack.set_session_status(token, channel, thread_ts, "closed")
     threads.patch(
-        thread_ts, closed=True, closed_at=time.time(), reason=reason, resumable=resumable
+        thread_ts, closed=True, closed_at=time.time(), reason=reason, resumable=resumable,
+        listeners=[],
     )
     return notified
 

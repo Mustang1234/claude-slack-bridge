@@ -367,7 +367,8 @@ def _keep_awake() -> "subprocess.Popen | None":
 
 
 def _apply_command(
-    token, channel, thread, label, kind, value, state, actor_id="", owner_id=""
+    token, channel, thread, label, kind, value, state, actor_id="", owner_id="",
+    scope="thread",
 ) -> bool:
     """폰에서 온 지킴이 명령을 처리한다. 닫혔으면 True."""
     now = time.time()
@@ -385,24 +386,37 @@ def _apply_command(
         if channel.startswith("D"):
             reply = "DM 에서는 쓸 수 없습니다."
         else:
-            current = cfg.channel_listeners(channel)
-            if kind == "listen":
-                current.extend(user_id for user_id in value if user_id not in current)
-                cfg.save_channel_listeners(channel, current)
-                reply = (
-                    "이 채널에서 이제 "
-                    + " ".join(f"<@{user_id}>" for user_id in value)
-                    + " 의 말도 듣습니다."
-                )
-            elif kind == "unlisten":
-                current = [user_id for user_id in current if user_id not in value]
-                cfg.save_channel_listeners(channel, current)
-                reply = " ".join(f"<@{user_id}>" for user_id in value) + " 는 이제 듣지 않습니다."
-            elif current:
-                people = ", ".join(f"<@{user_id}>" for user_id in current)
-                reply = f"이 채널에서 듣는 사람: <@{owner_id}>(주인), {people}"
+            channel_listeners = cfg.channel_listeners(channel)
+            thread_listeners = list(state.get("listeners") or [])
+            if kind == "listeners":
+                people = ", ".join(f"<@{user_id}>" for user_id in thread_listeners)
+                local = f"<@{owner_id}>(주인), {people}" if people else "주인만"
+                shared = ", ".join(f"<@{user_id}>" for user_id in channel_listeners) or "주인만"
+                reply = f"이 스레드에서 듣는 사람: {local}\n채널 전체: {shared}"
             else:
-                reply = "이 채널에서 듣는 사람: 주인만"
+                current = channel_listeners if scope == "channel" else thread_listeners
+                place = "이 채널" if scope == "channel" else "이 스레드"
+                if kind == "listen":
+                    current.extend(user_id for user_id in value if user_id not in current)
+                    prefix = "이 채널 전체" if scope == "channel" else place
+                    people = " ".join(f"<@{u}>" for u in value)
+                    reply = f"{prefix}에서 이제 {people} 의 말도 듣습니다."
+                else:
+                    removed = [u for u in value if u in current]
+                    missing = [u for u in value if u not in current]
+                    current = [u for u in current if u not in value]
+                    lines = []
+                    if removed:
+                        people = " ".join(f"<@{u}>" for u in removed)
+                        lines.append(f"{place}에서 {people} 는 이제 듣지 않습니다.")
+                    if missing:
+                        people = " ".join(f"<@{u}>" for u in missing)
+                        lines.append(f"{people} 는 {place} listener 가 아닙니다.")
+                    reply = "\n".join(lines)
+                if scope == "channel":
+                    cfg.save_channel_listeners(channel, current)
+                else:
+                    threads.patch(thread, listeners=current)
         try:
             slack.post_message(token, channel, reply, thread_ts=thread)
         except slack.SlackError:
@@ -633,7 +647,7 @@ def cmd_keeper(argv: list[str]) -> None:
                 return
             # channels.json은 작고 listener 변경은 드물다. 캐시 무효화 복잡성을
             # 들이지 않고 매 폴링에 읽어 모든 열린 스레드에 즉시 반영한다.
-            listeners = cfg.channel_listeners(channel)
+            listeners = _effective_listeners(channel, state)
             if require_mention and not owner_id and not state.get("owner_missing_warned"):
                 if _safe_patch(thread, owner_missing_warned=True):
                     try:
@@ -717,7 +731,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     if _apply_command(
                         conf.bot_token, channel, thread, label,
                         cmd[0], cmd[1], command_state,
-                        str(m.get("user") or ""), owner_id,
+                        str(m.get("user") or ""), owner_id, scope=cmd[2],
                     ):
                         _log("CLOSED_BY_USER")
                         threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -805,6 +819,11 @@ def cmd_keeper(argv: list[str]) -> None:
         st = threads.load(thread) or {}
         if st.get("keeper_pid") == os.getpid():
             threads.patch(thread, keeper_pid=None, keeper_protocol=None)
+
+
+def _effective_listeners(channel: str, state: dict) -> list[str]:
+    """채널 전체 권한과 현재 스레드 권한만 합친다."""
+    return list(dict.fromkeys(cfg.channel_listeners(channel) + (state.get("listeners") or [])))
 
 
 def _safe_patch(thread: str, **fields) -> bool:
@@ -1115,7 +1134,7 @@ def cmd_targets(argv: list[str]) -> None:
         _die("설정이 없습니다.")
     print(f"기본값: {conf.channel}" + ("  (봇과의 DM)" if conf.channel.startswith("D") else ""))
     if conf.owner_id:
-        print(f"소유자: {conf.owner_id}  (채널에서는 소유자와 listeners의 멘션만 지시로 받음)")
+        print(f"소유자: {conf.owner_id}  (채널에서는 소유자와 스레드 listeners·채널 전체 listeners의 멘션만 지시로 받음)")
     elif not conf.channel.startswith("D"):
         print("경고: owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
     convs = slack.my_conversations(conf.bot_token)
@@ -1154,7 +1173,7 @@ def cmd_doctor(argv: list[str]) -> None:
         if channels_error:
             print(f"경고: {channels_error} — listener 없이 진행합니다.")
         listeners = channels.get(conf.channel, {}).get("listeners") or []
-        print("listeners: " + (", ".join(listeners) if listeners else "0"))
+        print("채널 전체 listeners: " + (", ".join(listeners) if listeners else "0"))
     if target["kind"] == "channel" and not target["ready"]:
         _die(f"봇이 채널에 없습니다.\n  → /invite @{who.get('user')}")
     print("\n정상입니다.")
