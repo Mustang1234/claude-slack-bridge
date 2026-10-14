@@ -83,8 +83,69 @@ class ListenerTests(unittest.TestCase):
         self.assertEqual(self.command("채널 듣기 <@UA>"), "이 채널 전체에서 이제 <@UA> 의 말도 듣습니다.")
         self.assertEqual(cfg.channel_listeners("CCHAN"), ["UA"])
         self.assertEqual(threads.load("100.0"), before)
-        self.assertEqual(self.command("채널 그만 <@UA>"), "이 채널에서 <@UA> 는 이제 듣지 않습니다.")
+        self.assertEqual(self.command("채널 그만 <@UA>"), "<@UA> 채널 그만 완료.")
         self.assertEqual(cfg.channel_listeners("CCHAN"), [])
+
+    def test_channel_unlisten_sweeps_open_threads_in_same_channel(self):
+        cfg.save_channel_listeners("CCHAN", ["UA", "UB"])
+        for ts, channel, closed in (
+            ("100.0", "CCHAN", False), ("200.0", "CCHAN", False),
+            ("300.0", "COTHER", False), ("400.0", "CCHAN", True),
+        ):
+            threads.save(ts, {"channel": channel, "closed": closed, "listeners": ["UA", "UB"]})
+        unchanged = {ts: threads.load(ts) for ts in ("300.0", "400.0")}
+        reply = self.command("채널그만 <@UA>")
+        for ts in ("100.0", "200.0"):
+            self.assertEqual(threads.load(ts)["listeners"], ["UB"])
+        for ts, state in unchanged.items():
+            self.assertEqual(threads.load(ts), state)
+        self.assertEqual(cfg.channel_listeners("CCHAN"), ["UB"])
+        self.assertEqual(reply, "<@UA> 채널 그만 완료. 스레드 2곳 그만 완료")
+
+    def test_channel_unlisten_reports_each_person_in_order(self):
+        cfg.save_channel_listeners("CCHAN", ["UA"])
+        threads.patch("100.0", listeners=["UA", "UB"])
+        threads.patch("200.0", listeners=["UB"])
+        self.assertEqual(
+            self.command("채널그만 <@UA> <@UB>"),
+            "<@UA> 채널 그만 완료. 스레드 1곳 그만 완료\n"
+            "<@UB> 는 채널 listener 가 아닙니다. 스레드 2곳 그만 완료",
+        )
+        self.assertEqual(threads.load("100.0")["listeners"], [])
+        self.assertEqual(threads.load("200.0")["listeners"], [])
+        self.assertEqual(cfg.channel_listeners("CCHAN"), [])
+
+    def test_channel_unlisten_removes_thread_only_listener_and_skips_corrupt_files(self):
+        threads.patch("100.0", listeners=["UA"])
+        for name, content in (
+            ("300.0.json", b"{broken"), ("400.0.json", b"[]"),
+            ("500.0.json", b"\xff"),
+            ("600.0.json", b'{"channel":"CCHAN","listeners":42}'),
+            ("700.0.inbox.jsonl", b"not json"),
+            ("700.0.lock", b"not json"), ("700.0.keeper.log", b"not json"),
+        ):
+            (threads.THREADS_DIR / name).write_bytes(content)
+        with patch.object(threads, "load", wraps=threads.load) as load:
+            reply = self.command("채널그만 <@UA>")
+        self.assertEqual(threads.load("100.0")["listeners"], [])
+        self.assertEqual(reply, "<@UA> 는 채널 listener 가 아닙니다. 스레드 1곳 그만 완료")
+        self.assertNotIn("700.0", [call.args[0] for call in load.call_args_list])
+
+    def test_channel_unlisten_continues_after_patch_failure(self):
+        for ts in ("100.0", "200.0"):
+            threads.patch(ts, listeners=["UA"])
+        original_patch = threads.patch
+
+        def fail_one(ts, **fields):
+            if ts == "100.0":
+                raise OSError("cannot write")
+            return original_patch(ts, **fields)
+
+        with patch.object(threads, "patch", side_effect=fail_one):
+            reply = self.command("채널그만 <@UA>")
+        self.assertEqual(threads.load("100.0")["listeners"], ["UA"])
+        self.assertEqual(threads.load("200.0")["listeners"], [])
+        self.assertEqual(reply, "<@UA> 는 채널 listener 가 아닙니다. 스레드 1곳 그만 완료")
 
     def test_unlisten_missing_and_mixed_members(self):
         self.command("듣기 <@UA>")
@@ -94,7 +155,7 @@ class ListenerTests(unittest.TestCase):
             "이 스레드에서 <@UA> 는 이제 듣지 않습니다.\n<@UB> 는 이 스레드 listener 가 아닙니다.",
         )
         self.assertEqual(cfg.channel_listeners("CCHAN"), ["UA"])
-        self.assertEqual(self.command("채널 그만 <@UB>"), "<@UB> 는 이 채널 listener 가 아닙니다.")
+        self.assertEqual(self.command("채널 그만 <@UB>"), "<@UB> 는 채널 listener 가 아닙니다.")
         self.assertEqual(self.command("그만 <@UA>"), "<@UA> 는 이 스레드 listener 가 아닙니다.")
 
     def test_listing_both_scopes(self):
