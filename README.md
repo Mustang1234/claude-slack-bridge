@@ -165,7 +165,7 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 | `듣기 @사람` `listen @사람` | owner가 그 사람의 @멘션도 이 스레드에서 듣게 한다 (닫히면 소멸) |
 | `그만 @사람` `unlisten @사람` | owner가 그 사람을 이 스레드의 listener에서 뺀다 |
 | `채널 듣기 @사람` `channel listen @사람` | owner가 채널 전체의 모든 스레드에서 듣게 한다 (닫혀도 유지). `채널듣기`로 붙여 써도 된다 |
-| `채널 그만 @사람` `channel unlisten @사람` | owner가 채널 전체 listener에서 뺀다 |
+| `채널 그만 @사람` `channel unlisten @사람` | owner가 채널 전체 listener에서 빼고, 그 채널의 모든 열린 스레드에서도 뗀다. 답글은 사람별 한 줄로 채널 결과와 스레드 건수를 알린다 |
 | `누구 듣니` `누구 들어` `listeners` | 스레드와 채널 전체의 listener를 각각 확인한다 |
 | `닫기` `종료` | 취소선을 긋고 닫는다 |
 

@@ -415,6 +415,34 @@ def _apply_command(
                     reply = "\n".join(lines)
                 if scope == "channel":
                     cfg.save_channel_listeners(channel, current)
+                    if kind == "unlisten":
+                        counts = dict.fromkeys(value, 0)
+                        for path in threads.THREADS_DIR.glob("*.json"):
+                            try:
+                                other = threads.load(path.stem)
+                                if not isinstance(other, dict) or other.get("channel") != channel or other.get("closed"):
+                                    continue
+                                listeners = other.get("listeners")
+                                if not isinstance(listeners, list):
+                                    continue
+                                remaining = [u for u in listeners if u not in value]
+                                if remaining != listeners and _safe_patch(path.stem, listeners=remaining):
+                                    for user_id in counts:
+                                        if user_id in listeners:
+                                            counts[user_id] += 1
+                            except (OSError, ValueError, AttributeError, TypeError):
+                                # 손상되거나 순회 중 바뀐 상태 하나가 지킴이를 죽이면 안 된다.
+                                continue
+                        lines = []
+                        for user_id in value:
+                            if user_id in removed:
+                                line = f"<@{user_id}> 채널 그만 완료."
+                            else:
+                                line = f"<@{user_id}> 는 채널 listener 가 아닙니다."
+                            if counts[user_id]:
+                                line += f" 스레드 {counts[user_id]}곳 그만 완료"
+                            lines.append(line)
+                        reply = "\n".join(lines)
                 else:
                     threads.patch(thread, listeners=current)
         try:
