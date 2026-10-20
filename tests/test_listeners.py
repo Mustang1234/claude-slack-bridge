@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from claude_slack_bridge import chat, cli, config as cfg, slack, threads
+from claude_slack_bridge import chat, cli, config as cfg, server, slack, threads
 
 
 class ParserTests(unittest.TestCase):
@@ -163,6 +163,24 @@ class ListenerTests(unittest.TestCase):
         self.command("듣기 <@UA>")
         self.command("채널 듣기 <@UB>")
         self.assertEqual(self.command("listeners"), "이 스레드에서 듣는 사람: <@UOWNER>(주인), <@UA>\n채널 전체: <@UB>")
+
+    def test_chat_list_shows_thread_and_channel_listeners(self):
+        self.command("듣기 <@UA> <@UB>")
+        self.command("채널 듣기 <@UC>")
+        threads.patch("200.0", label="Missing")
+        threads.save("300.0", {"thread_ts": "300.0", "channel": "COTHER", "listeners": [], "label": "Empty"})
+        threads.save("400.0", {"thread_ts": "400.0", "channel": "DTEST", "listeners": ["UD"], "label": "DM"})
+        with patch.object(threads, "inbox_keeper_alive", return_value=False), \
+             patch.object(chat, "_chats", {}), \
+             patch("time.strftime", return_value="12:00"):
+            listing = server.slack_chat_list()
+        self.assertEqual(listing.splitlines(), [
+            "표시: ** 기본 스레드, * 이 세션이 쥔 스레드",
+            "100.0  마감 12:00  지킴이없음    스레드 listeners=UA,UB  채널 전체 listeners=UC",
+            "200.0  마감 12:00  지킴이없음  Missing  스레드 listeners=0  채널 전체 listeners=UC",
+            "300.0  마감 12:00  지킴이없음  Empty  스레드 listeners=0  채널 전체 listeners=0",
+            "400.0  마감 12:00  지킴이없음  DM",
+        ])
 
     def test_owner_gate_and_dm(self):
         for text in ("듣기 <@UA>", "채널 듣기 <@UA>", "그만 <@UA>", "채널 그만 <@UA>", "listeners"):
