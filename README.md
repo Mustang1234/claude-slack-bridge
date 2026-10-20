@@ -92,7 +92,7 @@ claude-slack-bridge manifest --name "내 비서"
 | `slack_check` | 토큰·채널·봇 초대 상태를 확인한다 |
 | `slack_chat_open` | 스레드를 열어 이 세션에 묶는다 (기본 7일) |
 | `slack_chat_attach` | **이미 있는 스레드**에 붙는다 (재시작 후 복귀·다른 세션 인계) |
-| `slack_chat_list` | 열려 있는 스레드와 지킴이 상태 |
+| `slack_chat_list` | 열려 있는 스레드와 지킴이 상태. 채널 스레드는 스레드 listener와 채널 전체 listener를 따로 보여준다 |
 | `slack_wait_reply` | 답글이 올 때까지 기다렸다 돌려준다 |
 | `slack_chat_extend` | 마감을 미룬다 |
 | `slack_chat_close` | 스레드를 닫는다 (머리글에 취소선) |

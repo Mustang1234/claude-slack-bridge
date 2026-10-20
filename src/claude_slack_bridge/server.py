@@ -232,7 +232,7 @@ Slack URL을 목적지로 받으면 채널 URL은 그 채널에 새 스레드를
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.4.0",
+    version="1.4.1",
     instructions=INSTRUCTIONS,
 )
 
@@ -1123,7 +1123,11 @@ def slack_chat_list() -> str:
         channel = str(r.get("channel") or "")
         listeners = cfg.channel_listeners(channel) if channel and not channel.startswith("D") else []
         if channel and not channel.startswith("D"):
-            listening = f"  채널 전체 listeners={','.join(listeners) if listeners else '0'}"
+            thread_listeners = r.get("listeners") or []
+            listening = (
+                f"  스레드 listeners={','.join(thread_listeners) if thread_listeners else '0'}"
+                f"  채널 전체 listeners={','.join(listeners) if listeners else '0'}"
+            )
         else:
             listening = ""
         marker = ""
