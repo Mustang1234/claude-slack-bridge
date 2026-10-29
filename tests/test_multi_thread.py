@@ -27,6 +27,8 @@ class MultiThreadTests(unittest.TestCase):
         self.enterContext(patch.object(server, "_start_keeper", return_value="test keeper"))
         self.enterContext(patch.object(slack, "resolve_target", side_effect=lambda token, target, default: target or default))
         self.enterContext(patch.object(slack, "assert_member"))
+        self.enterContext(patch.object(slack, "auth_test", return_value={"user_id": "UBOT"}))
+        self.enterContext(patch.object(slack, "conversations_replies", return_value=[]))
         self.enterContext(patch.object(slack, "chat_update"))
         self.enterContext(patch.object(slack, "set_session_status"))
         self.post = self.enterContext(patch.object(slack, "post_message", return_value={"ts": "300.0"}))

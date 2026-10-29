@@ -254,9 +254,9 @@ def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
 
 
 def conversations_replies(
-    token: str, channel: str, thread_ts: str, oldest: str | None = None
+    token: str, channel: str, thread_ts: str, oldest: str | None = None, limit: int = 100,
 ) -> list[dict]:
-    payload: dict = {"channel": channel, "ts": thread_ts, "limit": 100}
+    payload: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
     if oldest:
         payload["oldest"] = oldest
     return api(token, "conversations.replies", payload, form=True).get("messages", [])

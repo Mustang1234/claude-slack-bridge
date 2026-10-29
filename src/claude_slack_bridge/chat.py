@@ -103,6 +103,21 @@ def attach(
     if not channel:
         raise NoChat("어느 대화의 스레드인지 알 수 없습니다. channel 을 함께 주세요.")
 
+    # 작성자 판정은 한 번 저장한다. 조회가 실패하면 키를 쓰지 않아 옛 동작을 유지한다.
+    if "header_editable" not in state:
+        try:
+            identity = slack.auth_test(token)
+            # 머리글만 필요하다. 긴 스레드를 통째로 받으면 429·IncompleteRead 를 부른다.
+            messages = slack.conversations_replies(token, channel, thread_ts, limit=1)
+            parent = next((msg for msg in messages if msg.get("ts") == thread_ts), None)
+            if parent is not None:
+                if parent.get("user") and identity.get("user_id"):
+                    state["header_editable"] = parent["user"] == identity["user_id"]
+                elif parent.get("bot_id") and identity.get("bot_id"):
+                    state["header_editable"] = parent["bot_id"] == identity["bot_id"]
+        except slack.SlackError:
+            pass
+
     requested_label = label
     label = label or state.get("label") or "Claude 세션"
     label_changed = bool(requested_label) and label != state.get("label")
@@ -127,6 +142,8 @@ def attach(
         "label": label,
         "deadline": deadline,
     }
+    if "header_editable" in state:
+        fields["header_editable"] = state["header_editable"]
     # 읽어둔 상태를 통째로 되쓰면 그 사이 지킴이가 민 수신 커서까지 되감긴다.
     # 영속화 이전 기록에만 기본값을 보태고, 이미 있는 값은 잠금 안에서 보존한다.
     defaults = {
@@ -138,7 +155,8 @@ def attach(
     if reopening:
         # 닫힘 흔적만 지운다. down_since·down_alerted 는 두어야 한다 — ⚠️ 를
         # 보낸 채 닫혔으면 다시 열린 뒤 ✅ 로 짝을 맞춰야 한다.
-        fields.update(closed=False, closed_at=None, reason=None, resumable=None, warned=False)
+        fields.update(closed=False, closed_at=None, reason=None, resumable=None, warned=False,
+                      close_notice_posted=False, close_header_updated=False)
     threads.patch(thread_ts, **fields)
     if reopening:
         # 🔒 는 "이제 읽지 않습니다" 라고 말해 두었다. 그대로 두면 동료는 계속
@@ -394,6 +412,7 @@ def open_chat(token: str, channel: str, hours: float, label: str | None) -> Chat
         # owner_id 는 적지 않는다. 주인은 config.json 하나가 정본이다 — 스레드마다
         # 사본을 두면 사본을 안 채우는 경로(attach)에서 주인이 비어 버린다.
         "owner_missing_warned": False,
+        "header_editable": True,
     })
     return _remember(chat)
 
@@ -429,28 +448,39 @@ def close_thread(
     사람이 끝내지 않은 경로(세션 사망·옮기기·마감)만 True 를 넘긴다. 사유 문구로
     판정하지 않는 이유는 문구가 바뀌는 순간 판정이 조용히 깨지기 때문이다.
 
-    only_if_notified 는 통보가 하나라도 안 닿았으면 닫지 않고 False 로 돌아온다.
+    only_if_notified 는 답글 게시와 수정 가능한 머리글 갱신이 끝나야 닫는다.
+    각 단계의 성공을 저장하므로 재시도는 아직 성공하지 않은 단계만 수행한다.
     부르는 쪽이 다음 주기에 다시 시도할 수 있을 때(지킴이의 마감 처리) 쓴다.
     """
     stamp = time.strftime("%H:%M")
-    notified = True
-    try:
-        slack.chat_update(
-            token, channel, thread_ts,
-            f"~*{strikeable(label)}* — 종료됨 ({stamp})~\n_{reason}_",
-        )
-    except slack.SlackError:
-        notified = False
-    try:
-        slack.post_message(
-            token, channel,
-            f"{CLOSE_MARK} — {reason} ({stamp})\n이 스레드에 답글을 달아도 이제 읽지 않습니다.",
-            thread_ts=thread_ts,
-        )
-    except slack.SlackError:
-        # 닫는 길에 네트워크가 죽어도 상태는 정리한다. 못 알린 것보다 붙잡고
-        # 있는 쪽이 나쁘다 — 단, 다시 시도할 주체가 있으면 그쪽에 맡긴다.
-        notified = False
+    state = threads.load(thread_ts) or {}
+    header_done = state.get("header_editable") is False or bool(state.get("close_header_updated"))
+    notice_done = bool(state.get("close_notice_posted"))
+    if not header_done:
+        try:
+            slack.chat_update(
+                token, channel, thread_ts,
+                f"~*{strikeable(label)}* — 종료됨 ({stamp})~\n_{reason}_",
+            )
+        except slack.SlackError:
+            pass
+        else:
+            threads.patch(thread_ts, close_header_updated=True)
+            header_done = True
+    if not notice_done:
+        try:
+            slack.post_message(
+                token, channel,
+                f"{CLOSE_MARK} — {reason} ({stamp})\n이 스레드에 답글을 달아도 이제 읽지 않습니다.",
+                thread_ts=thread_ts,
+            )
+        except slack.SlackError:
+            pass
+        else:
+            # 각 성공을 즉시 남겨 다른 단계가 실패해도 다음 주기에 반복하지 않는다.
+            threads.patch(thread_ts, close_notice_posted=True)
+            notice_done = True
+    notified = header_done and notice_done
     if only_if_notified and not notified:
         return False
     slack.set_session_status(token, channel, thread_ts, "closed")
