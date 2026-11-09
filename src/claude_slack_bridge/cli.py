@@ -733,7 +733,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     pass
 
             try:
-                msgs = slack.conversations_replies(conf.bot_token, channel, thread)
+                msgs = slack.conversations_replies(conf.bot_token, channel, thread, cooldown_only=True)
             except slack.SlackError as e:
                 # 지킴이는 어지간해서는 죽지 않아야 한다. 죽으면 Esc 뒤에 폰이
                 # 완전한 침묵이 되고, 그때는 확인할 방법도 함께 사라진다.

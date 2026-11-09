@@ -149,3 +149,41 @@ class RateTests(unittest.TestCase):
                 with ratelimit._state("t", "read") as state:
                     self.assertEqual(state["cooldown"], 400)
                     self.assertEqual(state["next"], 400)
+
+    def test_six_keepers_ignore_monitor_reservations_every_five_seconds(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as root:
+            now = [100.0]
+            calls = []
+            def http(token, method, payload, form):
+                calls.append((now[0], payload.get("ts")))
+                return {"messages": [], "response_metadata": {"next_cursor": "more"}}
+            with patch.object(ratelimit, "RATE_DIR", Path(root)), \
+                 patch.object(ratelimit.time, "time", side_effect=lambda: now[0]), \
+                 patch.object(ratelimit.time, "sleep", side_effect=AssertionError("Keeper must not reserve")), \
+                 patch.object(slack, "_api_once", side_effect=http):
+                for tick in (100, 105, 110):
+                    now[0] = tick
+                    with ratelimit._state("t", "conversations.replies") as state:
+                        state["next"] = tick + 200  # --all의 밀린 예약
+                    for i in range(6):
+                        slack.conversations_replies("t", "C1", str(i), cooldown_only=True)
+                self.assertEqual([time for time, _ in calls], [100]*6+[105]*6+[110]*6)
+
+    def test_keeper_still_obeys_shared_cooldown(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as root:
+            now = [100.0]
+            with patch.object(ratelimit, "RATE_DIR", Path(root)), \
+                 patch.object(ratelimit.time, "time", side_effect=lambda: now[0]), \
+                 patch.object(ratelimit.time, "sleep", side_effect=lambda n: now.__setitem__(0, now[0]+n)):
+                with ratelimit._state("t", "read") as state:
+                    state.update(next=300, cooldown=107)
+                with ratelimit.slot("t", "read", cooldown_only=True):
+                    self.assertEqual(now[0], 107)
+
+    def test_far_future_next_is_clamped_not_reset(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as root:
+            with patch.object(ratelimit, "RATE_DIR", Path(root)), patch.object(ratelimit.time, "time", return_value=100):
+                with ratelimit._state("t", "read") as state:
+                    state["next"] = 1000000
+                with ratelimit._state("t", "read") as state:
+                    self.assertEqual(state["next"], 400)
