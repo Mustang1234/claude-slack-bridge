@@ -17,6 +17,7 @@ latest_reply 가 바뀐 것만 conversations.replies 로 연다. 브리지가 �
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import stat
@@ -81,6 +82,7 @@ def mention_record(channel: str, msg: dict, bot_user_id: str, parent: str | None
     """세션에 흘릴 한 줄. thread_ts 는 attach 할 스레드다 — 최상위면 그 메시지 자신."""
     return {
         "source": "channel",
+        "mentioned": f"<@{bot_user_id}>" in (msg.get("text") or ""),
         "channel": channel,
         "ts": msg.get("ts", ""),
         "thread_ts": parent or msg.get("ts", ""),
@@ -123,6 +125,7 @@ def poll(
     cursor = str(state.get("cursor") or start)
     seen: dict = dict(state.get("threads") or {})   # parent_ts -> 마지막으로 확인한 답글 ts
     out: list[dict] = []
+    streaks = dict(state.get("bot_streaks") or {})
 
     def for_me(m: dict) -> bool:
         return chat.is_for_me(m, bot_user_id, owner_id, require_mention=True, listeners=listeners)
@@ -142,6 +145,7 @@ def poll(
 
         latest = m.get("latest_reply")
         if not latest:
+            seen.setdefault(ts, ts)
             continue
         last = seen.get(ts)
         if last is None and first:
@@ -151,10 +155,16 @@ def poll(
             last = start
         if last is not None and float(latest) <= float(last):
             continue
-        seen[ts] = latest
         if ts in held:
             continue
         replies = fetch_replies(ts, last or ts)
+        fresh = [r for r in replies if str(r.get("ts")) != ts and float(r.get("ts", 0)) > float(last or ts)]
+        seen[ts] = max([str(last or ts)] + [str(r["ts"]) for r in fresh], key=float)
+        context = [{"ts": str(-i - 1), "bot_id": "prior"} for i in range(int(streaks.get(ts, 0)))] + fresh
+        streak = int(streaks.get(ts, 0))
+        for r in sorted(fresh, key=lambda m: float(m["ts"])):
+            streak = min(chat.BOT_TURN_LIMIT, streak + 1) if r.get("bot_id") else 0
+        streaks[ts] = streak
         for r in replies:
             rts = str(r.get("ts", ""))
             if rts == ts or (last and float(rts) <= float(last)):
@@ -162,12 +172,12 @@ def poll(
             if handle_message and handle_message(r, ts):
                 continue
             if chat.is_for_me(r, bot_user_id, owner_id, require_mention=True,
-                              listeners=listeners, context=replies):
+                              listeners=listeners, context=context):
                 out.append(mention_record(channel, r, bot_user_id, ts))
 
     cutoff = now - THREAD_WINDOW
     seen = {k: v for k, v in seen.items() if float(k) >= cutoff}
-    return out, {"cursor": cursor, "threads": seen}
+    return out, {"cursor": cursor, "threads": seen, "bot_streaks": {k: v for k, v in streaks.items() if k in seen}}
 
 
 def find_mention(message_ts: str) -> dict | None:
@@ -272,12 +282,13 @@ def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) ->
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = tracked()
         if on:
+            if key in data:
+                return data  # 중복 등록은 미읽은 커서와 연속 수를 그대로 유지한다.
             data[key] = {"channel": channel, "thread_ts": thread, "any_reply": any_reply}
-            # 등록과 첫 조회 사이의 글도 놓치지 않도록 등록 시점에 커서를 만든다.
-            if not load_state(key):
-                save_state(key, {"cursor": f"{time.time():.6f}"})
+            save_state(key, {"cursor": f"{time.time():.6f}", "bot_streak": 0, "generation": time.time_ns()})
         else:
             data.pop(key, None)
+            state_path(key).unlink(missing_ok=True)
         save_state("tracked", data)
         return data
 
@@ -297,9 +308,9 @@ def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners,
             continue
         if ts == thread or message.get("user") not in allowed:
             continue
-        # 증분 조회 이전의 연속 봇 수를 이어 붙인다. 처음에는 안전하게 제한값으로 시작한다.
+        # 증분 조회 이전의 연속 봇 수를 이어 붙인다. 첫 조회는 0부터 센다.
         prefix = [{"ts": str(-i - 1), "bot_id": "prior"}
-                  for i in range(int(state.get("bot_streak", chat.BOT_TURN_LIMIT)))]
+                  for i in range(int(state.get("bot_streak", 0)))]
         context = prefix + [m for m in replies if float(m.get("ts", 0)) > float(state["cursor"])
                             and str(m.get("ts")) != thread]
         if chat.is_for_me(message, bot_user_id, owners, require_mention=not any_reply,
@@ -307,7 +318,7 @@ def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners,
             record = mention_record(channel, message, bot_user_id, thread)
             record["files"] = message.get("files") or []
             out.append(record)
-    streak = int(state.get("bot_streak", chat.BOT_TURN_LIMIT))
+    streak = int(state.get("bot_streak", 0))
     for message in sorted(replies, key=lambda m: float(m.get("ts", 0))):
         if float(message.get("ts", 0)) > float(state["cursor"]) and str(message.get("ts")) != thread:
             streak = min(chat.BOT_TURN_LIMIT, streak + 1) if message.get("bot_id") else 0
@@ -321,7 +332,7 @@ def deliver_once(channel, thread, message_ts, write):
     key = f"delivered-{channel}"
     with open(lock_path(key), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        delivered = load_state(key)
+        delivered = recent_ledger(key)
         ts = str(message_ts)
         if ts in delivered:
             return False
@@ -342,6 +353,49 @@ def deliver_once(channel, thread, message_ts, write):
                 pass
         if not already:
             write()
-        delivered[ts] = True
+        delivered[ts] = time.time()
         save_state(key, delivered)
         return not already
+
+
+def valid_tracked(on_error=None):
+    result = []
+    for key, item in tracked().items():
+        try:
+            if not isinstance(item, dict) or not isinstance(item.get("channel"), str) or not isinstance(item.get("thread_ts"), str):
+                raise ValueError("잘못된 추적 항목")
+            if key != thread_key(item["channel"], item["thread_ts"]):
+                raise ValueError("추적 키와 대상 불일치")
+            result.append(item)
+        except Exception as exc:
+            if on_error:
+                on_error(f"tracked:{key}", exc)
+    return result
+
+
+def recent_ledger(key):
+    """전달・명령 원장은 처리 시각 기준 7일만 보관한다. 옛 bool 값은 ts로 이관한다."""
+    import math
+    data = load_state(key)
+    cutoff = time.time() - THREAD_WINDOW
+    recent = {}
+    for ts, value in data.items():
+        try:
+            stamp = float(ts if isinstance(value, bool) else value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(stamp) and stamp >= cutoff:
+            recent[ts] = stamp
+    if recent != data:
+        save_state(key, recent)
+    return recent
+
+
+@contextmanager
+def unchanged_tracking(key, snapshot):
+    """조회 도중 해제/재등록됐다면 이전 조회가 새 커서를 덮어쓰지 않는다."""
+    import fcntl
+    _ensure_dir()
+    with open(CHANNELS_DIR / "tracked-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield load_state(key) == snapshot

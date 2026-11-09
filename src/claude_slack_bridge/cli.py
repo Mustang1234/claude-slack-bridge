@@ -733,7 +733,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     pass
 
             try:
-                msgs = slack.conversations_replies(conf.bot_token, channel, thread)
+                msgs = slack.conversations_replies(conf.bot_token, channel, thread, cooldown_only=True)
             except slack.SlackError as e:
                 # 지킴이는 어지간해서는 죽지 않아야 한다. 죽으면 Esc 뒤에 폰이
                 # 완전한 침묵이 되고, 그때는 확인할 방법도 함께 사라진다.
@@ -1198,6 +1198,8 @@ def _publish_records(conf, channel, records):
             _emit_json(record)
         if not channels.deliver_once(channel, record["thread_ts"], record["ts"], write):
             continue
+        if not record.get("mentioned", True):
+            continue
         slack.set_session_status(
             conf.bot_token, channel, record["thread_ts"], "processing",
             initiator_user_id=str(record.get("user") or conf.owner_id),
@@ -1214,33 +1216,66 @@ def _channel_command(conf, channel, bot_user_id, message, parent, listeners):
         return False
     # 명령 결과는 일반 inbox로 전달하지 않는다. 기존 문구·owner 게이트를 재사용한다.
     key = f"commands-{channel}"
-    done = channels.load_state(key)
+    done = channels.recent_ledger(key)
     ts = str(message.get("ts") or "")
     if ts not in done:
         _apply_command(conf.bot_token, channel, parent, "", command[0], command[1],
                        threads.load(parent) or {}, str(message.get("user") or ""),
                        conf.owner_ids, scope="channel")
-        done[ts] = True
+        done[ts] = time.time()
         channels.save_state(key, done)
     listeners[:] = cfg.channel_listeners(channel)
     return True
 
 
-def _poll_channel_once(conf, channel, bot_user_id):
+def _poll_channel_once(conf, channel, bot_user_id, tracked=None):
     state = channels.load_state(channel)
     now = time.time()
     listeners = cfg.channel_listeners(channel)
-    explicit = {item["thread_ts"] for item in channels.tracked().values()
-                if item["channel"] == channel}
-    found, state = channels.poll(
-        channel, state,
-        slack.conversations_history(conf.bot_token, channel, channels.window_start(now)),
-        lambda parent, oldest: slack.conversations_replies(conf.bot_token, channel, parent),
-        bot_user_id, conf.owner_ids, listeners, channels.held_threads(channel) | explicit, now,
+    tracked = channels.valid_tracked() if tracked is None else tracked
+    explicit = {item["thread_ts"] for item in tracked if item["channel"] == channel}
+    held = channels.held_threads(channel) | explicit
+    pending = dict(state.get("history_pending") or {})
+    oldest = pending.get("oldest") or state.get("cursor") or f"{now - channels.FIRST_BACKFILL:.6f}"
+    paging = {"cursor": pending.get("cursor", "")}
+    history = slack.conversations_history(conf.bot_token, channel, oldest, max_pages=1, page_state=paging)
+    highwater = max([str(pending.get("highwater") or oldest)] + [str(m["ts"]) for m in history], key=float)
+    # 증분 history와 별개로 최신 부모 100개의 latest_reply를 매 회차 확인한다.
+    recent = slack.conversations_history(conf.bot_token, channel, None, max_pages=1)
+    merged = {str(m["ts"]): m for m in history}
+    for message in recent:
+        if float(message["ts"]) >= now - channels.THREAD_WINDOW:
+            merged[str(message["ts"])] = message
+    history = list(merged.values())
+    present = set(merged)
+    # 최신 페이지 밖의 알려진 부모에만 보조 순환을 적용한다.
+    parents = sorted(p for p in (state.get("threads") or {})
+                     if p not in present and p not in held and float(p) >= now - channels.THREAD_WINDOW)
+    offset = int(state.get("reply_offset", 0)) % max(1, len(parents))
+    selected = (parents[offset:] + parents[:offset])[:3]
+    history += [{"ts": p, "latest_reply": str(now)} for p in selected]
+    poll_state = dict(state)
+    seen = dict(state.get("threads") or {})
+    floor = str(state.get("cursor") or f"{now - channels.FIRST_BACKFILL:.6f}")
+    # 처음 발견한 옛 부모도 재합류/첫 조회 커서 이전의 답글을 백필하지 않는다.
+    for message in history:
+        parent = str(message["ts"])
+        seen.setdefault(parent, max(parent, floor, key=float))
+    poll_state["threads"] = seen
+    found, next_state = channels.poll(
+        channel, poll_state, history,
+        lambda parent, after: slack.conversations_replies(conf.bot_token, channel, parent, oldest=after, max_pages=3),
+        bot_user_id, conf.owner_ids, listeners, held, now,
         handle_message=lambda msg, parent: _channel_command(conf, channel, bot_user_id, msg, parent, listeners),
     )
+    next_state["reply_offset"] = offset + len(selected)
+    if paging.get("cursor"):
+        next_state["history_pending"] = {"oldest": oldest, "cursor": paging["cursor"], "highwater": highwater}
+        next_state["cursor"] = oldest  # 최신부터 오는 history의 뒷페이지를 건너뛰지 않는다.
+    else:
+        next_state["cursor"] = highwater
     _publish_records(conf, channel, found)
-    channels.save_state(channel, state)
+    channels.save_state(channel, next_state)
 
 
 def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_id=""):
@@ -1263,8 +1298,13 @@ def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_i
     originals = {str(message.get("ts")): message for message in replies}
     found = [record for record in found if not _channel_command(
         conf, channel, bot_user_id, originals[record["ts"]], thread, listeners)]
-    _publish_records(conf, channel, found)
-    channels.save_state(key, next_state)
+    with channels.unchanged_tracking(key, state) as unchanged:
+        if not unchanged:
+            return
+        if "generation" in state:
+            next_state["generation"] = state["generation"]
+        _publish_records(conf, channel, found)
+        channels.save_state(key, next_state)
 
 
 def _discover_once(conf, known, register=False, initialized=None):
@@ -1273,6 +1313,10 @@ def _discover_once(conf, known, register=False, initialized=None):
     for c in current:
         if c["id"] not in known:
             if register:
+                # 보통 봇을 먼저 부르고 나서 초대한다. 발견은 주기적이라 발견 시각을 커서로
+                # 잡으면 초대와 함께 온 첫 멘션이 커서 앞에 떨어져 영영 전달되지 않는다.
+                # FIRST_BACKFILL 만큼 거슬러 보되, 재초대 시 중복은 전달 원장이 거른다.
+                channels.save_state(c["id"], {"cursor": f"{time.time() - channels.FIRST_BACKFILL:.6f}", "threads": {}})
                 channels.set_watched(c["id"], True, c["name"])
             _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
                         "private": c["private"], "new": bool(known) if initialized is None else initialized})
@@ -1298,26 +1342,32 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
     # 한 대상의 어떤 오류도 나머지 감시를 멈추지 않는다. KeyboardInterrupt 는 Exception 이 아니라 빠져나간다.
     errors = (Exception,)
 
+    failed = set()
+
     def report(target, exc):
-        print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
+        if target not in failed:
+            print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
+            failed.add(target)
+
+    def recovered(target):
+        if target in failed:
+            print(f"SLACK_BACK\t{target}", file=sys.stderr, flush=True)
+            failed.remove(target)
 
     try:
         while True:
             if channel is None and time.monotonic() >= next_discovery:
                 try:
-                    known = _discover_once(conf, known, register=True, initialized=initialized)
+                    known = _discover_once(conf, known, register=initialized, initialized=initialized)
                     initialized = True
                     channels.save_state("discovery", {"ids": sorted(known)})
+                    recovered("discovery")
                 except errors as exc:
                     report("discovery", exc)
                 next_discovery = time.monotonic() + channels.DISCOVER_POLL
-            tracked = []
-            for item in channels.tracked().values():
-                try:
-                    channels.thread_key(item["channel"], item["thread_ts"])
-                    tracked.append(item)
-                except errors as exc:
-                    report("tracked", exc)
+            tracked = channels.valid_tracked(report)
+            for item in tracked:
+                recovered("tracked:" + channels.thread_key(item["channel"], item["thread_ts"]))
             targets = {channel} if channel else set(channels.watched()) | {
                 item["channel"] for item in tracked if item["channel"] in known}
             jobs = []
@@ -1354,9 +1404,19 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                     if parent:
                         _poll_thread_once(conf, target, parent, bot_user_id, any_answer, bot_id=bot_id)
                     else:
-                        _poll_channel_once(conf, target, bot_user_id)
+                        _poll_channel_once(conf, target, bot_user_id, tracked=tracked)
                 except errors as exc:
                     report(key, exc)
+                    if isinstance(exc, slack.SlackError) and exc.code == "thread_not_found" and parent:
+                        try:
+                            channels.set_tracked(target, parent, False)
+                            _emit_json({"event": "THREAD_GONE", "channel": target, "thread_ts": parent})
+                        except errors as cleanup_error:
+                            report(key + ":cleanup", cleanup_error)
+                        if key in locks:
+                            locks.pop(key).close()
+                        if thread:
+                            return
                     if isinstance(exc, slack.SlackError) and exc.code in ("not_in_channel", "channel_not_found", "is_archived"):
                         try:
                             channels.set_watched(target, False)
@@ -1368,7 +1428,8 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                             locks.pop(key).close()
                         if channel:
                             return
-                time.sleep(1.0)
+                else:
+                    recovered(key)
             time.sleep(max(1.0, interval))
     except KeyboardInterrupt:
         return

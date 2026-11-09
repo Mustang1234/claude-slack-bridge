@@ -42,7 +42,7 @@ class PollTests(unittest.TestCase):
         self.replies["5000.0"] = [msg("5000.0"), msg("5100.0"), msg("9900.0")]
         found, state = self.run_poll({}, history, now=now)
         self.assertEqual(sorted(f["ts"] for f in found), ["9900.0", "9950.0"])
-        self.assertEqual(state["threads"], {"5000.0": "9900.0"})
+        self.assertEqual(state["threads"], {"5000.0": "9900.0", "9950.0": "9950.0"})
 
     def test_top_level_mention_is_emitted_with_own_ts_as_thread(self):
         found, state = self.run_poll({"cursor": "999.0"}, [msg("1001.0")])

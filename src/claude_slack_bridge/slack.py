@@ -77,9 +77,9 @@ def scrub_check(text: str) -> None:
             raise BodyRejected(f"본문에 {label} 로 보이는 값이 있어 보내지 않았습니다.")
 
 
-def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
+def api(token: str, method: str, payload: dict, form: bool = False, *, cooldown_only: bool = False) -> dict:
     for attempt in range(3):
-        with ratelimit.slot(token, method) as defer:
+        with ratelimit.slot(token, method, cooldown_only=cooldown_only) as defer:
             try:
                 return _api_once(token, method, payload, form)
             except SlackError as exc:
@@ -294,42 +294,55 @@ def conversations_open(token: str, user_id: str) -> str:
     return api(token, "conversations.open", {"users": user_id}, form=True)["channel"]["id"]
 
 
-def _pages(token: str, method: str, payload: dict, field: str) -> list[dict]:
+def _pages(token: str, method: str, payload: dict, field: str, max_pages=None, page_state=None) -> list[dict]:
     out = []
     seen = set()
     payload = dict(payload)
+    count = 0
+    if page_state and page_state.get("cursor"):
+        payload["cursor"] = page_state["cursor"]
+        seen.add(page_state["cursor"])
     while True:
         data = api(token, method, payload, form=True)
+        count += 1
         out.extend(data.get(field) or [])
         cursor = (data.get("response_metadata") or {}).get("next_cursor", "").strip()
+        if page_state is not None:
+            page_state["cursor"] = cursor
         if not cursor:
             return out
         if cursor in seen:
             raise SlackError("pagination_loop", method)
+        if max_pages is not None and count >= max_pages:
+            return out
         seen.add(cursor)
         payload["cursor"] = cursor
 
 
-def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
+def conversations_history(token: str, channel: str, oldest: str | None, *, max_pages=None, page_state=None) -> list[dict]:
     """대화의 최근 메시지를 읽는다.
 
     DM 에서는 사람이 스레드가 아니라 그냥 아래에 이어 쓴다. 스레드 답글만 보면
     폰에서 보낸 말을 영영 못 본다.
     """
-    payload = {"channel": channel, "limit": 100, "oldest": oldest}
-    return _pages(token, "conversations.history", payload, "messages")
+    payload = {"channel": channel, "limit": 100}
+    if oldest is not None:
+        payload["oldest"] = oldest
+    return _pages(token, "conversations.history", payload, "messages", max_pages, page_state)
 
 
 def conversations_replies(
     token: str, channel: str, thread_ts: str, oldest: str | None = None, limit: int = 100,
+    *, max_pages=None, cooldown_only=False,
 ) -> list[dict]:
     payload: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
     if oldest:
         payload["oldest"] = oldest
-    if limit == 1:
+    if limit == 1 or cooldown_only:
         # attach의 머리글 조회는 의도적으로 한 건만 요청한다.
-        return api(token, "conversations.replies", payload, form=True).get("messages", [])
-    return _pages(token, "conversations.replies", payload, "messages")
+        return api(token, "conversations.replies", payload, form=True,
+                   **({"cooldown_only": True} if cooldown_only else {})).get("messages", [])
+    return _pages(token, "conversations.replies", payload, "messages", max_pages)
 
 
 def my_conversations(token: str) -> list[dict]:

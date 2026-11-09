@@ -46,7 +46,7 @@ def _state(token, method):
                         value = float(raw.get(key, 0))
                     except (ValueError, TypeError):
                         value = 0.0
-                    state[key] = value if math.isfinite(value) and 0 <= value <= now + 300 else 0.0
+                    state[key] = min(value, now + 300) if math.isfinite(value) and value >= 0 else 0.0
                 yield state
                 fh.seek(0)
                 fh.truncate()
@@ -58,11 +58,12 @@ def _state(token, method):
 
 
 @contextmanager
-def slot(token, method=""):
+def slot(token, method="", cooldown_only=False):
     interval = 1.0 if method == "chat.postMessage" else MIN_INTERVAL
     with _state(token, method) as state:
-        scheduled = max(time.time(), state["next"], state["cooldown"])
-        state["next"] = scheduled + interval
+        scheduled = max(time.time(), state["cooldown"], 0 if cooldown_only else state["next"])
+        if not cooldown_only:
+            state["next"] = scheduled + interval
     while True:
         delay = scheduled - time.time()
         if delay > 0:
@@ -71,8 +72,9 @@ def slot(token, method=""):
         # 예약 후 다른 호출이 받은 429도 반영한다. 대기자들은 다시 슬롯을 예약한다.
         with _state(token, method) as state:
             if state["cooldown"] > scheduled:
-                scheduled = max(time.time(), state["next"], state["cooldown"])
-                state["next"] = scheduled + interval
+                scheduled = max(time.time(), state["cooldown"], 0 if cooldown_only else state["next"])
+                if not cooldown_only:
+                    state["next"] = scheduled + interval
                 continue
         break
 
