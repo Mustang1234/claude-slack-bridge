@@ -676,7 +676,7 @@ def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | No
             threads.patch(chat.thread_ts, warned=True)
 
         try:
-            require_mention = bool(state.get("require_mention"))
+            require_mention = not chat.channel.startswith("D") or bool(state.get("require_mention"))
             listeners = list(dict.fromkeys(
                 cfg.channel_listeners(chat.channel) + (state.get("listeners") or [])
             )) if not chat.channel.startswith("D") else []

@@ -19,14 +19,32 @@ Socket Mode 나 Events API 를 쓰면 토큰이 둘로 늘고 설치 단계가 �
 
 ## 설치
 
+### personal 과 team 중 고르기
+
+이 레포는 용도가 다른 브리지 두 가지를 함께 배포한다. **태그로 고른다.**
+
+| | personal | team |
+|---|---|---|
+| 용도 | 혼자 쓰는 개인 에이전트 | 팀 채널에서 여러 사람·에이전트가 같이 쓰는 팀 에이전트 |
+| 브랜치 | `main` | `team` |
+| 태그 | `v<버전>` (예: `v1.4.4`) | `team-v<버전>` (예: `team-v1.5.0`) |
+| team 에만 있는 기능 | — | 채널 멘션 모니터, 복수 owner, 머리글 보호 |
+
+아래 명령의 `<태그>` 를 고른 쪽의 **최신 태그**로 바꾼다. 태그 목록은
+[Tags](https://github.com/Mustang1234/claude-slack-bridge/tags) 에 있다.
+
+- 태그 없이 받으면 `main` 의 개발 중인 코드가 설치된다. 쓰는 용도의 stable 태그를 고정한다.
+- personal ↔ team 을 바꿀 때도 태그만 바꾸면 된다. 버전이 다르므로 uvx 가 새로 설치한다.
+  `init` 과 `claude mcp add` 의 태그는 같은 것으로 맞춘다.
+
 ```bash
 # 1) Slack 앱 등록 + 토큰 발급 + 멤버 ID와 목적지 준비 — docs/SETUP.md 참고
 # 2) 설정하고 연결까지 확인
-uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge init
+uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge init
 
 # 3) Claude Code 에 붙이기
 claude mcp add claude-slack-bridge -s user -- \
-  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge
+  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge
 ```
 
 `-s user` 는 모든 프로젝트에서 쓰겠다는 뜻이다. 알림은 어느 프로젝트에서 일하든
