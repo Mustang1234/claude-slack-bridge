@@ -31,6 +31,7 @@ class MonitorTests(unittest.TestCase):
         self.emit = self.enterContext(patch.object(cli, "_emit_json"))
 
     def test_all_discovers_joins_and_removes_channels(self):
+        channels.save_state("discovery", {"ids": ["COLD"]})
         channels.set_watched("COLD", True)
         pages = [[{"id": "C1", "name": "one", "private": False},
                   {"id": "C2", "name": "two", "private": True}],
@@ -55,6 +56,7 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(any(e.get("event") == "CHANNEL" and e["channel"] == "C3" and e["new"] for e in events))
 
     def test_channel_lock_prevents_overlapping_all(self):
+        channels.set_watched("C1", True)
         lock = channels.acquire_lock("C1")
         self.addCleanup(lock.close)
         with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
@@ -65,15 +67,17 @@ class MonitorTests(unittest.TestCase):
         self.assertIn({"event": "ALREADY_WATCHING", "channel": "C1"}, [c.args[0] for c in self.emit.call_args_list])
 
     def test_channel_and_all_use_same_scanner(self):
+        channels.set_watched("C1", True)
         for args in (["--channel", "C1"], ["--all"]):
             with self.subTest(args=args), \
                  patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
                  patch.object(cli, "_poll_channel_once") as poll, \
                  patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
                 cli.cmd_monitor(args)
-            poll.assert_called_once_with(self.conf, "C1", "UBOT")
+            poll.assert_called_once_with(self.conf, "C1", "UBOT", tracked=[])
 
     def test_tracked_management_and_all_poll(self):
+        channels.set_watched("C1", True)
         cli.cmd_monitor(["--track", "C1", "1.0", "--any-reply"])
         self.assertTrue(next(iter(channels.tracked().values()))["any_reply"])
         with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
@@ -196,6 +200,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.emit.call_args.args[0]["ts"], "101")
 
     def test_all_emits_channel_records_for_multiple_channels(self):
+        channels.set_watched("C1", True)
+        channels.set_watched("C2", True)
         conversations = [{"id": c, "name": c, "private": False} for c in ("C1", "C2")]
         def sleep(seconds):
             if seconds == 10:
@@ -265,6 +271,7 @@ class MonitorTests(unittest.TestCase):
                     lock.close()
 
     def test_all_reports_conflict_once_then_rejoins(self):
+        channels.set_watched("C1", True)
         lock = channels.acquire_lock("C1")
         self.addCleanup(lock.close)
         rounds = []
@@ -284,6 +291,7 @@ class MonitorTests(unittest.TestCase):
         poll.assert_called_once()
 
     def test_thread_and_channel_scanners_use_independent_locks(self):
+        channels.set_watched("C1", True)
         for key, args, method in (
             ("C1", ["--thread-poll", "C1", "1.0"], "_poll_thread_once"),
             (channels.thread_key("C1", "1.0"), ["--all"], "_poll_channel_once"),
@@ -300,6 +308,7 @@ class MonitorTests(unittest.TestCase):
                     lock.close()
 
     def test_all_tracked_uses_same_thread_lock_as_standalone(self):
+        channels.set_watched("C1", True)
         channels.set_tracked("C1", "1.0", True)
         lock = channels.acquire_lock(channels.thread_key("C1", "1.0"))
         self.addCleanup(lock.close)
@@ -360,6 +369,8 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(channels.load_state("delivered-C1")["101"])
 
     def test_target_errors_do_not_stop_other_channels_or_threads(self):
+        channels.set_watched("C1", True)
+        channels.set_watched("C2", True)
         channels.set_tracked("C1", "1.0", True)
         def sleep(seconds):
             if seconds == 10:
@@ -430,6 +441,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(threads.read_inbox("1.0", 0)) + self.emit.call_count, 1)
 
     def test_one_tracked_thread_error_does_not_skip_next_thread(self):
+        channels.set_watched("C1", True)
         channels.set_tracked("C1", "1.0", True)
         channels.set_tracked("C1", "2.0", True)
         def sleep(seconds):
@@ -442,3 +454,81 @@ class MonitorTests(unittest.TestCase):
              patch.object(cli, "print"):
             cli.cmd_monitor(["--all"])
         self.assertEqual([call.args[2] for call in poll.call_args_list], ["1.0", "2.0"])
+
+    def test_first_discovery_does_not_register_existing_membership(self):
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once") as poll, \
+             patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+            cli.cmd_monitor(["--all"])
+        self.assertEqual(channels.watched(), {})
+        self.assertEqual(channels.load_state("discovery")["ids"], ["C1"])
+        poll.assert_not_called()
+
+    def test_retrack_resets_cursor_and_untrack_deletes_state(self):
+        key = channels.thread_key("C1", "1.0")
+        channels.save_state(key, {"cursor": "100"})
+        channels.set_tracked("C1", "1.0", False)
+        self.assertFalse(channels.state_path(key).exists())
+        with patch.object(channels.time, "time", return_value=200):
+            channels.set_tracked("C1", "1.0", True)
+        with patch.object(slack, "conversations_replies", return_value=[message(150), message(201)]):
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+        self.assertEqual([call.args[0]["ts"] for call in self.emit.call_args_list], ["201"])
+
+    def test_rejoining_channel_starts_at_now(self):
+        channels.save_state("C1", {"cursor": "10", "threads": {"1.0": "10"}})
+        with patch.object(cli.time, "time", return_value=200), \
+             patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]):
+            cli._discover_once(self.conf, set(), register=True, initialized=True)
+        self.assertEqual(channels.load_state("C1"), {"cursor": "200.000000", "threads": {}})
+
+    def test_first_listener_bot_reply_is_received(self):
+        found, state = channels.thread_poll("C1", "1.0", {"cursor": "100"},
+            [message(101, "UAGENT", bot_id="BOTHER")], "UBOT", ["UOWNER"], ["UAGENT"])
+        self.assertEqual([m["ts"] for m in found], ["101"])
+        self.assertEqual(state["bot_streak"], 1)
+
+    def test_channel_incremental_history_and_replies_are_bounded(self):
+        channels.save_state("C1", {"cursor": "100", "threads": {"1.0": "90"}})
+        with patch.object(slack, "conversations_history", return_value=[message(101)]) as history, \
+             patch.object(slack, "conversations_replies", return_value=[message(95)]) as replies:
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        self.assertEqual(history.call_count, 1)
+        self.assertEqual(history.call_args.args[2], "100")
+        self.assertEqual(history.call_args.kwargs["max_pages"], 1)
+        # 이번 시각 기준 7일 이내인 부모만 순회한다.
+        with patch.object(cli.time, "time", return_value=200), \
+             patch.object(slack, "conversations_history", return_value=[]), \
+             patch.object(slack, "conversations_replies", return_value=[message(95)]) as replies:
+            channels.save_state("C1", {"cursor": "100", "threads": {"1.0": "90"}})
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        replies.assert_called_once_with("test-token", "C1", "1.0", oldest="90", max_pages=3)
+        self.assertEqual(channels.load_state("C1")["threads"]["1.0"], "95")
+
+    def test_all_has_no_per_target_sleep(self):
+        channels.set_watched("C1", True)
+        channels.set_watched("C2", True)
+        with patch.object(slack, "my_conversations", return_value=[{"id": c, "name": c, "private": False} for c in ("C1", "C2")]), \
+             patch.object(cli, "_poll_channel_once") as poll, \
+             patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt) as sleep:
+            cli.cmd_monitor(["--all", "--interval", "30"])
+        self.assertEqual(poll.call_count, 2)
+        sleep.assert_called_once_with(30)
+
+    def test_history_page_continuation_does_not_skip_older_new_posts(self):
+        channels.save_state("C1", {"cursor": "100", "threads": {}})
+        def history(token, channel, oldest, **kwargs):
+            paging = kwargs["page_state"]
+            if not paging.get("cursor"):
+                paging["cursor"] = "next"
+                return [message(120)]
+            self.assertEqual(oldest, "100")
+            paging["cursor"] = ""
+            return [message(110)]
+        with patch.object(slack, "conversations_history", side_effect=history), \
+             patch.object(slack, "conversations_replies", return_value=[]):
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+            self.assertEqual(channels.load_state("C1")["cursor"], "100")
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        self.assertEqual(channels.load_state("C1")["cursor"], "120")
+        self.assertEqual([c.args[0]["ts"] for c in self.emit.call_args_list], ["120", "110"])

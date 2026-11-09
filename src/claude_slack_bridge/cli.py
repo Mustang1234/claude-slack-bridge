@@ -1226,21 +1226,40 @@ def _channel_command(conf, channel, bot_user_id, message, parent, listeners):
     return True
 
 
-def _poll_channel_once(conf, channel, bot_user_id):
+def _poll_channel_once(conf, channel, bot_user_id, tracked=None):
     state = channels.load_state(channel)
     now = time.time()
     listeners = cfg.channel_listeners(channel)
-    explicit = {item["thread_ts"] for item in channels.tracked().values()
-                if item["channel"] == channel}
-    found, state = channels.poll(
-        channel, state,
-        slack.conversations_history(conf.bot_token, channel, channels.window_start(now)),
-        lambda parent, oldest: slack.conversations_replies(conf.bot_token, channel, parent),
-        bot_user_id, conf.owner_ids, listeners, channels.held_threads(channel) | explicit, now,
+    tracked = channels.valid_tracked() if tracked is None else tracked
+    explicit = {item["thread_ts"] for item in tracked if item["channel"] == channel}
+    held = channels.held_threads(channel) | explicit
+    pending = dict(state.get("history_pending") or {})
+    oldest = pending.get("oldest") or state.get("cursor") or f"{now - channels.FIRST_BACKFILL:.6f}"
+    paging = {"cursor": pending.get("cursor", "")}
+    history = slack.conversations_history(conf.bot_token, channel, oldest, max_pages=1, page_state=paging)
+    highwater = max([str(pending.get("highwater") or oldest)] + [str(m["ts"]) for m in history], key=float)
+    # oldest 이후 history에는 예전 부모의 latest_reply 변경이 보이지 않는다.
+    # 알려진 부모를 최대 세 개씩 순환하여 7일 전체 history 조회를 대신한다.
+    present = {str(m["ts"]) for m in history}
+    parents = sorted(p for p in (state.get("threads") or {})
+                     if p not in present and p not in held and float(p) >= now - channels.THREAD_WINDOW)
+    offset = int(state.get("reply_offset", 0)) % max(1, len(parents))
+    selected = (parents[offset:] + parents[:offset])[:3]
+    history += [{"ts": p, "latest_reply": str(now)} for p in selected]
+    found, next_state = channels.poll(
+        channel, state, history,
+        lambda parent, after: slack.conversations_replies(conf.bot_token, channel, parent, oldest=after, max_pages=3),
+        bot_user_id, conf.owner_ids, listeners, held, now,
         handle_message=lambda msg, parent: _channel_command(conf, channel, bot_user_id, msg, parent, listeners),
     )
+    next_state["reply_offset"] = offset + len(selected)
+    if paging.get("cursor"):
+        next_state["history_pending"] = {"oldest": oldest, "cursor": paging["cursor"], "highwater": highwater}
+        next_state["cursor"] = oldest  # 최신부터 오는 history의 뒷페이지를 건너뛰지 않는다.
+    else:
+        next_state["cursor"] = highwater
     _publish_records(conf, channel, found)
-    channels.save_state(channel, state)
+    channels.save_state(channel, next_state)
 
 
 def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_id=""):
@@ -1273,6 +1292,7 @@ def _discover_once(conf, known, register=False, initialized=None):
     for c in current:
         if c["id"] not in known:
             if register:
+                channels.save_state(c["id"], {"cursor": f"{time.time():.6f}", "threads": {}})
                 channels.set_watched(c["id"], True, c["name"])
             _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
                         "private": c["private"], "new": bool(known) if initialized is None else initialized})
@@ -1305,19 +1325,13 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
         while True:
             if channel is None and time.monotonic() >= next_discovery:
                 try:
-                    known = _discover_once(conf, known, register=True, initialized=initialized)
+                    known = _discover_once(conf, known, register=initialized, initialized=initialized)
                     initialized = True
                     channels.save_state("discovery", {"ids": sorted(known)})
                 except errors as exc:
                     report("discovery", exc)
                 next_discovery = time.monotonic() + channels.DISCOVER_POLL
-            tracked = []
-            for item in channels.tracked().values():
-                try:
-                    channels.thread_key(item["channel"], item["thread_ts"])
-                    tracked.append(item)
-                except errors as exc:
-                    report("tracked", exc)
+            tracked = channels.valid_tracked(report)
             targets = {channel} if channel else set(channels.watched()) | {
                 item["channel"] for item in tracked if item["channel"] in known}
             jobs = []
@@ -1354,7 +1368,7 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                     if parent:
                         _poll_thread_once(conf, target, parent, bot_user_id, any_answer, bot_id=bot_id)
                     else:
-                        _poll_channel_once(conf, target, bot_user_id)
+                        _poll_channel_once(conf, target, bot_user_id, tracked=tracked)
                 except errors as exc:
                     report(key, exc)
                     if isinstance(exc, slack.SlackError) and exc.code in ("not_in_channel", "channel_not_found", "is_archived"):
@@ -1368,7 +1382,6 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                             locks.pop(key).close()
                         if channel:
                             return
-                time.sleep(1.0)
             time.sleep(max(1.0, interval))
     except KeyboardInterrupt:
         return
