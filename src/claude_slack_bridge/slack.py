@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import ratelimit
+
 API_BASE = "https://slack.com/api/"
 TIMEOUT = 15
 
@@ -76,6 +78,20 @@ def scrub_check(text: str) -> None:
 
 
 def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
+    for attempt in range(3):
+        with ratelimit.slot(token) as defer:
+            try:
+                return _api_once(token, method, payload, form)
+            except SlackError as exc:
+                if exc.code != "ratelimited":
+                    raise
+                defer(getattr(exc, "retry_after", 30.0))
+                if attempt == 2:
+                    raise
+    raise AssertionError("unreachable")
+
+
+def _api_once(token: str, method: str, payload: dict, form: bool = False) -> dict:
     """Slack Web API 호출.
 
     인코딩을 골라야 하는 이유가 있다. Slack 의 읽기 계열 메서드 일부는 JSON
@@ -103,6 +119,13 @@ def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            error = SlackError("ratelimited", method)
+            try:
+                error.retry_after = max(0.0, float(e.headers.get("Retry-After", "30")))
+            except (ValueError, TypeError):
+                error.retry_after = 30.0
+            raise error from e
         raise SlackError("http_error", method, f"HTTP {e.code}") from e
     except urllib.error.URLError as e:
         raise SlackError("network_error", method, str(e.reason)) from e
@@ -271,6 +294,22 @@ def conversations_open(token: str, user_id: str) -> str:
     return api(token, "conversations.open", {"users": user_id}, form=True)["channel"]["id"]
 
 
+def _pages(token: str, method: str, payload: dict, field: str) -> list[dict]:
+    out = []
+    seen = set()
+    payload = dict(payload)
+    while True:
+        data = api(token, method, payload, form=True)
+        out.extend(data.get(field) or [])
+        cursor = (data.get("response_metadata") or {}).get("next_cursor", "").strip()
+        if not cursor:
+            return out
+        if cursor in seen:
+            raise SlackError("pagination_loop", method)
+        seen.add(cursor)
+        payload["cursor"] = cursor
+
+
 def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
     """대화의 최근 메시지를 읽는다.
 
@@ -278,7 +317,7 @@ def conversations_history(token: str, channel: str, oldest: str) -> list[dict]:
     폰에서 보낸 말을 영영 못 본다.
     """
     payload = {"channel": channel, "limit": 100, "oldest": oldest}
-    return api(token, "conversations.history", payload, form=True).get("messages", [])
+    return _pages(token, "conversations.history", payload, "messages")
 
 
 def conversations_replies(
@@ -287,7 +326,7 @@ def conversations_replies(
     payload: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
     if oldest:
         payload["oldest"] = oldest
-    return api(token, "conversations.replies", payload, form=True).get("messages", [])
+    return _pages(token, "conversations.replies", payload, "messages")
 
 
 def my_conversations(token: str) -> list[dict]:
@@ -300,14 +339,14 @@ def my_conversations(token: str) -> list[dict]:
     im 은 여기 넣지 않는다. 그 타입을 요청하려면 im:read 가 필요한데, 그 스코프를
     더하면 이미 설치한 사람이 앱을 다시 설치해야 한다. DM 은 설정에 이미 있다.
     """
-    out = api(token, "users.conversations", {
+    out = _pages(token, "users.conversations", {
         "types": "public_channel,private_channel",
         "exclude_archived": True,
         "limit": 200,
-    }, form=True)
+    }, "channels")
     return [
         {"id": c.get("id"), "name": c.get("name", ""), "private": bool(c.get("is_private"))}
-        for c in out.get("channels", [])
+        for c in out
     ]
 
 

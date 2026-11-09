@@ -113,6 +113,9 @@ class AttachOriginTests(unittest.TestCase):
         self.enterContext(patch.object(slack, "update_header", return_value=True))
         self.enterContext(patch.object(slack, "set_session_status"))
         self.enterContext(patch.object(slack, "post_message", return_value={"ts": "300.0"}))
+        self.enterContext(patch.object(slack, "auth_test", return_value={"user_id": BOT}))
+        self.enterContext(patch.object(slack, "conversations_replies", return_value=[]))
+        self.enterContext(patch.object(slack, "api", side_effect=AssertionError("Unexpected Slack API call")))
         # 리스너가 남의 스레드 안에서 부른 멘션
         channels.append_inbox("C1", channels.mention_record(
             "C1", msg("1002.0", user="ULISTEN"), BOT, "900.0"))
