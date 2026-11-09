@@ -282,6 +282,8 @@ def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) ->
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = tracked()
         if on:
+            if key in data:
+                return data  # 중복 등록은 미읽은 커서와 연속 수를 그대로 유지한다.
             data[key] = {"channel": channel, "thread_ts": thread, "any_reply": any_reply}
             save_state(key, {"cursor": f"{time.time():.6f}", "bot_streak": 0, "generation": time.time_ns()})
         else:

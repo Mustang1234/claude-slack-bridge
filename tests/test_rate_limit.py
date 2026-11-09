@@ -203,3 +203,10 @@ class RateTests(unittest.TestCase):
             messages = slack.conversations_replies("t", "C1", "0", oldest="0", max_pages=3)
         self.assertEqual(api.call_count, 3)
         self.assertEqual([m["ts"] for m in messages], ["1", "2", "3"])
+
+
+    def test_recent_history_omits_oldest_and_stops_after_one_page(self):
+        with patch.object(slack, "api", return_value={"messages": [], "response_metadata": {"next_cursor": "unused"}}) as api:
+            slack.conversations_history("t", "C1", None, max_pages=1)
+        api.assert_called_once()
+        self.assertEqual(api.call_args.args[2], {"channel": "C1", "limit": 100})

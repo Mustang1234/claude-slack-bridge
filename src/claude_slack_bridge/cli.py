@@ -1240,16 +1240,30 @@ def _poll_channel_once(conf, channel, bot_user_id, tracked=None):
     paging = {"cursor": pending.get("cursor", "")}
     history = slack.conversations_history(conf.bot_token, channel, oldest, max_pages=1, page_state=paging)
     highwater = max([str(pending.get("highwater") or oldest)] + [str(m["ts"]) for m in history], key=float)
-    # oldest 이후 history에는 예전 부모의 latest_reply 변경이 보이지 않는다.
-    # 알려진 부모를 최대 세 개씩 순환하여 7일 전체 history 조회를 대신한다.
-    present = {str(m["ts"]) for m in history}
+    # 증분 history와 별개로 최신 부모 100개의 latest_reply를 매 회차 확인한다.
+    recent = slack.conversations_history(conf.bot_token, channel, None, max_pages=1)
+    merged = {str(m["ts"]): m for m in history}
+    for message in recent:
+        if float(message["ts"]) >= now - channels.THREAD_WINDOW:
+            merged[str(message["ts"])] = message
+    history = list(merged.values())
+    present = set(merged)
+    # 최신 페이지 밖의 알려진 부모에만 보조 순환을 적용한다.
     parents = sorted(p for p in (state.get("threads") or {})
                      if p not in present and p not in held and float(p) >= now - channels.THREAD_WINDOW)
     offset = int(state.get("reply_offset", 0)) % max(1, len(parents))
     selected = (parents[offset:] + parents[:offset])[:3]
     history += [{"ts": p, "latest_reply": str(now)} for p in selected]
+    poll_state = dict(state)
+    seen = dict(state.get("threads") or {})
+    floor = str(state.get("cursor") or f"{now - channels.FIRST_BACKFILL:.6f}")
+    # 처음 발견한 옛 부모도 재합류/첫 조회 커서 이전의 답글을 백필하지 않는다.
+    for message in history:
+        parent = str(message["ts"])
+        seen.setdefault(parent, max(parent, floor, key=float))
+    poll_state["threads"] = seen
     found, next_state = channels.poll(
-        channel, state, history,
+        channel, poll_state, history,
         lambda parent, after: slack.conversations_replies(conf.bot_token, channel, parent, oldest=after, max_pages=3),
         bot_user_id, conf.owner_ids, listeners, held, now,
         handle_message=lambda msg, parent: _channel_command(conf, channel, bot_user_id, msg, parent, listeners),

@@ -319,13 +319,15 @@ def _pages(token: str, method: str, payload: dict, field: str, max_pages=None, p
         payload["cursor"] = cursor
 
 
-def conversations_history(token: str, channel: str, oldest: str, *, max_pages=None, page_state=None) -> list[dict]:
+def conversations_history(token: str, channel: str, oldest: str | None, *, max_pages=None, page_state=None) -> list[dict]:
     """대화의 최근 메시지를 읽는다.
 
     DM 에서는 사람이 스레드가 아니라 그냥 아래에 이어 쓴다. 스레드 답글만 보면
     폰에서 보낸 말을 영영 못 본다.
     """
-    payload = {"channel": channel, "limit": 100, "oldest": oldest}
+    payload = {"channel": channel, "limit": 100}
+    if oldest is not None:
+        payload["oldest"] = oldest
     return _pages(token, "conversations.history", payload, "messages", max_pages, page_state)
 
 

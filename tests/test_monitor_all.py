@@ -493,8 +493,9 @@ class MonitorTests(unittest.TestCase):
         with patch.object(slack, "conversations_history", return_value=[message(101)]) as history, \
              patch.object(slack, "conversations_replies", return_value=[message(95)]) as replies:
             cli._poll_channel_once(self.conf, "C1", "UBOT")
-        self.assertEqual(history.call_count, 1)
-        self.assertEqual(history.call_args.args[2], "100")
+        self.assertEqual(history.call_count, 2)
+        self.assertEqual(history.call_args_list[0].args[2], "100")
+        self.assertIsNone(history.call_args_list[1].args[2])
         self.assertEqual(history.call_args.kwargs["max_pages"], 1)
         # 이번 시각 기준 7일 이내인 부모만 순회한다.
         with patch.object(cli.time, "time", return_value=200), \
@@ -518,6 +519,8 @@ class MonitorTests(unittest.TestCase):
     def test_history_page_continuation_does_not_skip_older_new_posts(self):
         channels.save_state("C1", {"cursor": "100", "threads": {}})
         def history(token, channel, oldest, **kwargs):
+            if oldest is None:
+                return []
             paging = kwargs["page_state"]
             if not paging.get("cursor"):
                 paging["cursor"] = "next"
@@ -613,3 +616,60 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(channels.load_state(key)["cursor"], "200.000000")
             else:
                 self.assertFalse(channels.state_path(key).exists())
+
+
+    def test_recent_thirty_parents_detect_old_reply_in_first_cycle(self):
+        parents = [message(str(i) + ".0", latest_reply="150") for i in range(1, 31)]
+        parents[0]["latest_reply"] = "201"
+        channels.save_state("C1", {"cursor": "200", "threads": {m["ts"]: "150" for m in parents}})
+        with patch.object(cli.time, "time", return_value=300), \
+             patch.object(slack, "conversations_history", side_effect=[[], parents]) as history, \
+             patch.object(slack, "conversations_replies", return_value=[message(201)]) as replies:
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        self.assertEqual(history.call_count, 2)
+        replies.assert_called_once_with("test-token", "C1", "1.0", oldest="150", max_pages=3)
+        self.assertEqual([c.args[0]["ts"] for c in self.emit.call_args_list], ["201"])
+
+    def test_unchanged_recent_parents_make_no_reply_requests(self):
+        parents = [message(str(i) + ".0", latest_reply="150") for i in range(1, 31)]
+        channels.save_state("C1", {"cursor": "200", "threads": {m["ts"]: "150" for m in parents}})
+        with patch.object(cli.time, "time", return_value=300), \
+             patch.object(slack, "conversations_history", side_effect=[[], parents]) as history, \
+             patch.object(slack, "conversations_replies") as replies:
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        self.assertEqual(history.call_count, 2)
+        replies.assert_not_called()
+        self.emit.assert_not_called()
+
+    def test_only_parents_outside_recent_page_use_auxiliary_rotation(self):
+        parents = [message(str(i) + ".0", latest_reply="150") for i in range(5, 105)]
+        channels.save_state("C1", {"cursor": "200", "threads": {f"{i}.0": "150" for i in range(1, 105)}})
+        with patch.object(cli.time, "time", return_value=300), \
+             patch.object(slack, "conversations_history", side_effect=[[], parents]), \
+             patch.object(slack, "conversations_replies", return_value=[]) as replies:
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        self.assertEqual([c.args[2] for c in replies.call_args_list], ["1.0", "2.0", "3.0"])
+
+    def test_duplicate_track_preserves_unread_cursor_and_count(self):
+        with patch.object(channels.time, "time", return_value=100):
+            channels.set_tracked("C1", "1.0", True)
+        key = channels.thread_key("C1", "1.0")
+        state = channels.load_state(key)
+        state["bot_streak"] = 3
+        channels.save_state(key, state)
+        with patch.object(channels.time, "time", return_value=200):
+            channels.set_tracked("C1", "1.0", True, any_reply=True)
+        self.assertEqual(channels.load_state(key), state)
+        self.assertFalse(channels.tracked()[key]["any_reply"])
+        with patch.object(slack, "conversations_replies", return_value=[message(150)]):
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+        self.assertEqual(self.emit.call_args.args[0]["ts"], "150")
+
+    def test_recent_unknown_parent_does_not_replay_prejoin_replies(self):
+        channels.save_state("C1", {"cursor": "200", "threads": {}})
+        with patch.object(cli.time, "time", return_value=300), \
+             patch.object(slack, "conversations_history", side_effect=[[], [message("1.0", latest_reply="150")]]), \
+             patch.object(slack, "conversations_replies") as replies:
+            cli._poll_channel_once(self.conf, "C1", "UBOT")
+        replies.assert_not_called()
+        self.emit.assert_not_called()
