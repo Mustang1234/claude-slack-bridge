@@ -4,7 +4,7 @@
 안에서 순서대로 안내하고, 각 단계가 실제로 됐는지 검사까지 한다. 아래는 미리
 훑어보고 싶을 때 보는 것이다.
 
-`<태그>` 는 personal(`v<버전>`)·team(`team-v<버전>`) 중 쓰려는 쪽의 최신 태그다 — README 「personal 과 team 중 고르기」 참고.
+`<태그>` 는 보통 personal 이면 `latest`, team 이면 `team-latest` 다. 특정 버전에 머물 때만 `v<버전>`·`team-v<버전>` 을 쓴다 — README 「personal 과 team 중 고르기」 참고.
 
 ```bash
 uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge init
