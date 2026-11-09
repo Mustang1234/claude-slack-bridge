@@ -203,6 +203,65 @@ class ListenerTests(unittest.TestCase):
                 self.assertFalse(chat.is_for_me({**message, "text": "hello"}, "UBOT", "UOWNER", True, listeners))
         self.assertEqual(cli._effective_listeners("COTHER", threads.load("200.0")), [])
 
+    def test_bot_listener_filter(self):
+        base = {"user": "UAGENT", "bot_id": "BAGENT", "text": "<@UBOT> hello"}
+        for subtype in (None, "bot_message"):
+            with self.subTest(subtype=subtype):
+                self.assertTrue(chat.is_for_me({**base, "subtype": subtype}, "UBOT", "UOWNER", True, ["UAGENT"], "BBOT"))
+        cases = [
+            ({**base, "text": "hello"}, "UOWNER", True, ["UAGENT"]),
+            (base, "UOWNER", True, []),
+            ({**base, "user": "UBOT"}, "UOWNER", True, ["UBOT"]),
+            ({**base, "bot_id": "BBOT"}, "UOWNER", True, ["UAGENT"]),
+            (base, "", True, ["UAGENT"]),
+            (base, "UOWNER", False, ["UAGENT"]),
+            ({**base, "user": ""}, "UOWNER", True, ["UAGENT"]),
+            ({**base, "subtype": "message_changed"}, "UOWNER", True, ["UAGENT"]),
+            ({**base, "subtype": "file_share"}, "UOWNER", True, ["UAGENT"]),
+            ({"subtype": "bot_message", "text": "<@UBOT> legacy"}, "UOWNER", True, ["UAGENT"]),
+        ]
+        for msg, owner, mention, listeners in cases:
+            with self.subTest(msg=msg, owner=owner, mention=mention):
+                self.assertFalse(chat.is_for_me(msg, "UBOT", owner, mention, listeners, "BBOT"))
+
+    def test_bot_listener_commands_cannot_mutate_state(self):
+        self.command("듣기 <@UAGENT>")
+        before = threads.load("100.0")
+        for command in ("핑", "연장", "마감 18:00", "닫기", "듣기 <@UA>", "그만 <@UAGENT>", "채널 듣기 <@UA>", "채널 그만 <@UA>"):
+            msg = {"user": "UAGENT", "bot_id": "BAGENT", "text": "<@UBOT> " + command}
+            self.assertTrue(chat.is_for_me(msg, "UBOT", "UOWNER", True, before["listeners"]))
+            self.assertEqual(self.command(chat.strip_mention(msg["text"], "UBOT"), actor=msg["user"]), "주인만 할 수 있습니다.")
+            self.assertEqual(threads.load("100.0"), before)
+            self.assertFalse(cfg.CHANNELS_PATH.exists())
+
+    def test_health_counts_only_allowed_bot_messages(self):
+        for bot, text, expected in (("BA", "<@UBOT> hello", True), ("BBOT", "<@UBOT> hello", False), ("BA", "hello", False), ("BA", "<@UBOT> 닫기", False)):
+            threads.patch("100.0", down_since=0)
+            msg = {"ts": str(time.time() - 600), "user": "UA", "bot_id": bot, "text": text}
+            with patch.object(threads, "session_listening", return_value=True):
+                cli._check_session_health("test-token", "CCHAN", "100.0", [msg], "UBOT", "UOWNER", True, ["UA"], {}, bot_id="BBOT")
+            self.assertEqual(bool(threads.load("100.0").get("down_since")), expected)
+
+    def test_wait_reply_uses_bot_listener_union(self):
+        self.command("듣기 <@UA>")
+        self.command("채널 듣기 <@UB>")
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(slack, "auth_test", return_value={"bot_id": "BBOT"}):
+            for user, text, bot, accepted in (
+                ("UA", "<@UBOT> local", "BA", True),
+                ("UB", "<@UBOT> shared", "BB", True),
+                ("UA", "no mention", "BA", False),
+                ("UOTHER", "<@UBOT> denied", "BC", False),
+                ("UA", "<@UBOT> self", "BBOT", False),
+            ):
+                msg = {"user": user, "text": text, "bot_id": bot, "subtype": "bot_message"}
+                with patch.object(chat, "poll_new", return_value=[msg]):
+                    status, messages = chat.wait_reply("test-token", "UBOT", 0)
+                self.assertEqual(status, "messages" if accepted else "timeout")
+                self.assertEqual(messages, [msg] if accepted else [])
+
     def test_close_clears_thread_listeners_only(self):
         self.command("듣기 <@UA>")
         self.command("채널 듣기 <@UB>")
@@ -224,8 +283,8 @@ class ListenerTests(unittest.TestCase):
         cfg.save_channel_listeners("CCHAN", ["UB"])
         messages = [
             [{"ts": "101.0", "user": "UOWNER", "text": "<@UBOT> 듣기 <@UA>"}],
-            [{"ts": "102.0", "user": "UA", "text": "<@UBOT> local"},
-             {"ts": "103.0", "user": "UB", "text": "<@UBOT> shared"},
+            [{"ts": "102.0", "user": "UA", "bot_id": "BA", "subtype": "bot_message", "text": "<@UBOT> local"},
+             {"ts": "103.0", "user": "UB", "bot_id": "BB", "text": "<@UBOT> shared"},
              {"ts": "104.0", "user": "UOTHER", "text": "<@UBOT> denied"}],
         ]
         sleeps = []
