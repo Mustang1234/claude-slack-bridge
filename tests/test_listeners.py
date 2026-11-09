@@ -53,6 +53,7 @@ class ListenerTests(unittest.TestCase):
         self.enterContext(patch.object(slack, "api", side_effect=AssertionError("Unexpected Slack API call")))
         self.post = self.enterContext(patch.object(slack, "post_message"))
         self.enterContext(patch.object(slack, "chat_update"))
+        self.enterContext(patch.object(slack, "update_header", return_value=True))
         self.enterContext(patch.object(slack, "set_session_status", return_value=False))
         threads.save("100.0", {"channel": "CCHAN", "closed": False, "deadline": time.time() + 3600, "require_mention": True})
         threads.save("200.0", {"channel": "CCHAN", "closed": False, "deadline": time.time() + 3600, "require_mention": True})

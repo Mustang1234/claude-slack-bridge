@@ -148,7 +148,10 @@ def post_message(token: str, channel: str, text: str, thread_ts: str | None = No
     scrub_check(text)
     if len(text) > BODY_MAX:
         text = text[: BODY_MAX - 20] + "\n… (잘림)"
-    payload: dict = {"channel": channel, "text": text, **_identity}
+    # 링크 미리보기는 끈다. 정리 메시지처럼 원문 링크를 여럿 거는 글에서 미리보기가
+    # 링크마다 붙어 본문보다 길어진다(사용자 요청, 2026-10-15).
+    payload: dict = {"channel": channel, "text": text, "unfurl_links": False,
+                     "unfurl_media": False, **_identity}
     if thread_ts:
         payload["thread_ts"] = thread_ts
     return api(token, "chat.postMessage", payload)
@@ -198,6 +201,31 @@ def chat_update(token: str, channel: str, ts: str, text: str) -> dict:
     에서 바로 보인다.
     """
     return api(token, "chat.update", {"channel": channel, "ts": ts, "text": text})
+
+
+HEADER_MARKS = ("— 대화를 엽니다.", "— 종료됨 (")
+
+
+def update_header(token: str, channel: str, ts: str, text: str) -> bool:
+    """스레드 머리글을 고쳐 쓴다 — 단, 그 루트가 브리지가 올린 머리글일 때만.
+
+    남이 연 스레드나, 봇이 다른 용도로 올린 글(일정 정리 표 등)의 스레드에 붙은
+    경우 루트는 머리글이 아니다. 그대로 chat.update 를 부르면 봇이 쓴 본문이
+    머리글로 덮인다(실측 2026-10-21: 일정 정리 글이 라벨 갱신·세션 종료 때 두 번
+    덮였다). 루트 본문을 읽어 머리글 표식이 있을 때만 고친다. 돌려주는 값은
+    실제로 고쳤는지다.
+    """
+    try:
+        msgs = api(token, "conversations.history", {
+            "channel": channel, "latest": ts, "oldest": ts, "inclusive": "true", "limit": 1,
+        }, form=True).get("messages", [])
+    except SlackError:
+        return False
+    root = msgs[0].get("text", "") if msgs else ""
+    if not any(mark in root for mark in HEADER_MARKS):
+        return False
+    chat_update(token, channel, ts, text)
+    return True
 
 
 def chat_delete(token: str, channel: str, ts: str) -> dict:

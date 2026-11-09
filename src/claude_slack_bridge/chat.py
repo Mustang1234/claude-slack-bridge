@@ -67,8 +67,15 @@ def attach(
     channel: str = "",
     hours: float | None = None,
     label: str | None = None,
+    called_at: str = "",
 ) -> Chat:
     """이미 있는 스레드에 이 세션을 묶는다.
+
+    called_at 은 채널 감시가 잡은 멘션의 ts 다. 주면 두 가지가 달라진다.
+      - 닫힌 스레드도 다시 연다. 끝난 스레드라도 그 안에서 다시 불렸으면 거기서
+        답해야 한다 — 막으면 답할 길이 아예 없다(스레드 밖으로는 답이 안 나간다).
+      - 지킴이 커서를 그 멘션까지 민다. 멘션은 채널 Monitor 가 이미 흘렸으니
+        지킴이가 같은 말을, 혹은 붙기 전의 남의 대화를 다시 흘리지 않게.
 
     스레드를 여는 것과 붙는 것은 다른 일이다. 이 구분이 없으면 두 경우가 막힌다.
 
@@ -90,12 +97,12 @@ def attach(
             chat.header = header_text(label, chat.deadline)
             threads.patch(thread_ts, label=label)
             try:
-                slack.chat_update(token, chat.channel, thread_ts, chat.header)
+                slack.update_header(token, chat.channel, thread_ts, chat.header)
             except slack.SlackError:
                 pass
         return _remember(chat)
     reopening = bool(state.get("closed"))
-    if not resumable(state):
+    if not resumable(state) and not called_at:
         reason = str(state.get("reason") or "").split("\n")[0]
         raise NoChat(f"이미 닫힌 스레드입니다: {thread_ts} ({reason or '사유 없음'})")
 
@@ -152,6 +159,10 @@ def attach(
         "require_mention": not channel.startswith("D"),
     }
     fields.update({key: value for key, value in defaults.items() if key not in state})
+    if called_at:
+        seen = float(state.get("keeper_seen_ts") or 0)
+        if float(called_at) > seen:
+            fields["keeper_seen_ts"] = float(called_at)
     if reopening:
         # 닫힘 흔적만 지운다. down_since·down_alerted 는 두어야 한다 — ⚠️ 를
         # 보낸 채 닫혔으면 다시 열린 뒤 ✅ 로 짝을 맞춰야 한다.
@@ -171,7 +182,7 @@ def attach(
             pass
     if label_changed or reopening:
         try:
-            slack.chat_update(
+            slack.update_header(
                 token, channel, thread_ts,
                 header_text(label, deadline),
             )
@@ -424,7 +435,7 @@ def extend(token: str, hours: float, thread_ts: str | None = None) -> Chat:
     chat.warned = False
     threads.patch(chat.thread_ts, deadline=chat.deadline, warned=False)
     try:
-        slack.chat_update(
+        slack.update_header(
             token, chat.channel, chat.thread_ts,
             header_text(chat.label or "Claude 세션", chat.deadline),
         )
@@ -458,7 +469,7 @@ def close_thread(
     notice_done = bool(state.get("close_notice_posted"))
     if not header_done:
         try:
-            slack.chat_update(
+            slack.update_header(
                 token, channel, thread_ts,
                 f"~*{strikeable(label)}* — 종료됨 ({stamp})~\n_{reason}_",
             )
@@ -513,16 +524,24 @@ def warn_text(remaining: float) -> str:
     )
 
 
-def is_human(msg: dict, bot_user_id: str) -> bool:
+# 듣기로 끼운 봇끼리 서로 멘션하며 답하면 끝이 없다. 사람 발화 없이 봇 발화가 이만큼
+# 이어지면 그 뒤의 봇 발화는 받지 않는다. 사람이 한 마디 하면 다시 센다.
+BOT_TURN_LIMIT = 5
+
+
+def is_human(msg: dict, bot_user_id: str, allowed_bots=()) -> bool:
     """내가 보낸 것을 걸러낸다.
+
+    다른 봇의 말은 기본적으로 받지 않는다. 소유자가 `듣기`·`채널 듣기` 로 끼운 봇
+    (allowed_bots)만 사람처럼 받는다 — AI 에이전트끼리 일을 주고받을 때 쓴다.
 
     ntfy 에서는 내가 POST 한 것이 내 구독으로 되돌아와 자기 자신을 깨우는 루프가
     생겼고, 그걸 막으려고 발신 ID 파일과 1.2초 유예를 뒀다. Slack 은 메시지에
     발신 주체가 붙어 오므로 시간 유예 없이 결정적으로 걸러진다.
     """
-    if msg.get("bot_id"):
-        return False
     if msg.get("user") == bot_user_id:
+        return False
+    if msg.get("bot_id") and msg.get("user") not in set(allowed_bots):
         return False
     if msg.get("subtype"):          # 채널 입장/파일 공유 알림 등
         return False
@@ -532,9 +551,10 @@ def is_human(msg: dict, bot_user_id: str) -> bool:
 def is_for_me(
     msg: dict,
     bot_user_id: str,
-    owner_id: str = "",
+    owner_id: str | list[str] = "",
     require_mention: bool = False,
     listeners: list[str] | None = None,
+    context: list[dict] | None = None,
 ) -> bool:
     """이 메시지를 내 세션에 대한 지시로 받아들일지 판정한다.
 
@@ -550,17 +570,32 @@ def is_for_me(
     채널인데 소유자가 없으면 아무 지시도 받지 않는다. 이 상태는 지킴이가
     스레드에 한 번 경고해 고장과 구분되게 한다.
     """
-    if not is_human(msg, bot_user_id):
+    if not is_human(msg, bot_user_id, listeners or ()):
+        return False
+    if msg.get("bot_id") and context is not None and bot_streak(context, msg) >= BOT_TURN_LIMIT:
         return False
     if require_mention:
-        if not owner_id:
+        owners = [owner_id] if isinstance(owner_id, str) else list(owner_id)
+        owners = [o for o in owners if o]
+        if not owners:
             return False
-        allowed = {owner_id, *(listeners or [])}
+        allowed = {*owners, *(listeners or [])}
         if msg.get("user") not in allowed:
             return False
         if f"<@{bot_user_id}>" not in (msg.get("text") or ""):
             return False
     return True
+
+
+def bot_streak(msgs: list[dict], upto: dict) -> int:
+    """upto 직전까지, 마지막 사람 발화 뒤로 이어진 봇 발화 수(내 발화 포함)."""
+    limit = float(upto.get("ts", 0))
+    streak = 0
+    for m in sorted(msgs, key=lambda m: float(m.get("ts", 0))):
+        if float(m.get("ts", 0)) >= limit:
+            break
+        streak = streak + 1 if m.get("bot_id") else 0
+    return streak
 
 
 def strip_mention(text: str, bot_user_id: str) -> str:

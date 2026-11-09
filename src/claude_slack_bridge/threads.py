@@ -165,7 +165,11 @@ def append_inbox_event(thread_ts: str, event: str) -> Path:
 
 def _append_inbox_record(thread_ts: str, record: dict) -> Path:
     """완전한 JSON 한 줄을 append하고 디스크 반영까지 마친다."""
-    path = ensure_inbox(thread_ts)
+    return append_jsonl(ensure_inbox(thread_ts), record)
+
+
+def append_jsonl(path: Path, record: dict) -> Path:
+    """append-only JSONL 에 한 줄을 내구성 있게 남긴다. 채널 inbox 도 같은 규칙을 쓴다."""
     line = json.dumps(record, ensure_ascii=False) + "\n"
     # 쓰는 도중 강제종료되면 마지막 JSON 한 줄만 반쪽으로 남을 수 있다. 다음
     # 기록을 그대로 붙이면 둘이 한 줄이 되어 새 메시지까지 못 읽으므로, 끊긴 줄은

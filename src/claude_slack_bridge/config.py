@@ -4,8 +4,12 @@
 이력에 한 번만 들어가도 되돌릴 수 없다. 그래서 홈 디렉터리 밖에 두고 권한을 좁힌다.
 
 토큰·채널 등은 환경변수 > 설정 파일이다 — 파일을 두기 곤란한 환경에서도 돌아야 한다.
-owner_id만은 설정 파일 값이 먼저고, 비어 있을 때만 SLACK_OWNER_ID를 쓴다. 파일 루트
+소유자만은 설정 파일 값이 먼저고, 비어 있을 때만 SLACK_OWNER_ID를 쓴다. 파일 루트
 owner_id 하나만으로 따로 설정하지 않아도 주인이 정해져야 하기 때문이다.
+
+소유자는 여럿일 수 있다(`owner_ids`). 모두 같은 권한을 갖고, 목록의 첫 사람이 대표
+소유자다 — ⚠️/✅ DM 을 받는다. 전원에게 보내면 같은 경고가 사람 수만큼 겹친다.
+옛 설정의 `owner_id` 문자열도 그대로 읽는다.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path(os.path.expanduser("~/.claude-slack-bridge"))
@@ -25,10 +29,21 @@ CHANNELS_PATH = CONFIG_DIR / "channels.json"
 class Config:
     bot_token: str
     channel: str
-    owner_id: str = ""      # 채널에서 내 지시로 인정할 사람. 비면 채널 지시를 받지 않음.
+    owner_id: str = ""      # 대표 소유자. 비면 채널 지시를 받지 않음.
     display_name: str = ""  # 메시지 발신자 이름 덮어쓰기(chat:write.customize 필요). 비면 봇 프로필 이름.
     icon_emoji: str = ""    # 발신자 아이콘 — ":robot_face:" 꼴. icon_url 보다 우선.
     icon_url: str = ""      # 발신자 아이콘 이미지 URL(https). 비면 앱 아이콘.
+    co_owner_ids: list[str] = field(default_factory=list)  # 대표 외 소유자. 권한은 같다.
+
+    @property
+    def owner_ids(self) -> list[str]:
+        """모든 소유자. 첫 사람이 대표다."""
+        if not self.owner_id:
+            return []
+        return list(dict.fromkeys([self.owner_id, *self.co_owner_ids]))
+
+    def is_owner(self, user_id: str) -> bool:
+        return bool(user_id) and user_id in self.owner_ids
 
     @property
     def masked_token(self) -> str:
@@ -61,8 +76,8 @@ def load() -> Config | None:
         icon_url = str(raw.get("icon_url", "")).strip()
     else:
         display_name = icon_emoji = icon_url = ""
-    owner = str(raw.get("owner_id", "")).strip()
-    owner = owner or os.environ.get("SLACK_OWNER_ID", "").strip()
+    owners = parse_owner_ids(raw.get("owner_ids")) or parse_owner_ids(raw.get("owner_id"))
+    owners = owners or parse_owner_ids(os.environ.get("SLACK_OWNER_ID", ""))
     display_name = os.environ.get("SLACK_DISPLAY_NAME", display_name).strip()
     icon_emoji = os.environ.get("SLACK_ICON_EMOJI", icon_emoji).strip()
     icon_url = os.environ.get("SLACK_ICON_URL", icon_url).strip()
@@ -76,20 +91,35 @@ def load() -> Config | None:
     return Config(
         bot_token=token,
         channel=channel,
-        owner_id=owner,
+        owner_id=owners[0] if owners else "",
         display_name=display_name,
         icon_emoji=icon_emoji,
         icon_url=icon_url,
+        co_owner_ids=owners[1:],
     )
 
 
-def save(token: str, channel: str, owner_id: str = "") -> Path:
+def parse_owner_ids(value) -> list[str]:
+    """목록·쉼표 구분 문자열·문자열 하나를 모두 받아 중복 없는 ID 목록으로."""
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = [v for v in value if isinstance(v, str)]
+    else:
+        return []
+    return list(dict.fromkeys(v.strip() for v in items if v.strip()))
+
+
+def save(token: str, channel: str, owner_id: str | list[str] = "") -> Path:
     """설정 파일을 쓰고 소유자만 읽게 잠근다."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # 디렉터리도 좁힌다. 파일 권한만 좁히고 디렉터리를 열어두면 의미가 반감된다.
     os.chmod(CONFIG_DIR, stat.S_IRWXU)
 
-    payload = {"bot_token": token, "channel": channel, "owner_id": owner_id}
+    owners = parse_owner_ids(owner_id)
+    payload: dict = {"bot_token": token, "channel": channel, "owner_id": owners[0] if owners else ""}
+    if len(owners) > 1:
+        payload["owner_ids"] = owners
     tmp = CONFIG_PATH.with_suffix(".json.tmp")
     # 먼저 좁은 권한으로 만들고 쓴다. 쓰고 나서 chmod 하면 그 사이가 열려 있다.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
