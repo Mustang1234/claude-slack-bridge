@@ -16,7 +16,7 @@ class CloseNoticeTests(unittest.TestCase):
         self.enterContext(patch.object(slack, "api", side_effect=AssertionError("Unexpected Slack API call")))
         self.auth = self.enterContext(patch.object(slack, "auth_test", return_value={"user_id": "UBOT", "bot_id": "BBOT"}))
         self.replies = self.enterContext(patch.object(slack, "conversations_replies", return_value=[{"ts": "100.0", "user": "UBOT"}]))
-        self.update = self.enterContext(patch.object(slack, "chat_update"))
+        self.update = self.enterContext(patch.object(slack, "update_header", return_value=True))
         self.post = self.enterContext(patch.object(slack, "post_message", return_value={"ts": "200.0"}))
         self.enterContext(patch.object(slack, "set_session_status"))
         threads.save("100.0", {"thread_ts": "100.0", "channel": "CCHAN", "closed": False})

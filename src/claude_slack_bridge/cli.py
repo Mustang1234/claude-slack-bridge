@@ -19,6 +19,7 @@ import sys
 import time
 from importlib import resources
 
+from . import channels
 from . import chat
 from . import config as cfg
 from . import slack
@@ -215,11 +216,13 @@ def permission_warning() -> str:
         "  지킴이 기동이 '허가 없는 영속화' 로 분류돼 막힙니다.",
         _red("  모델은 이 권한을 스스로 추가할 수 없습니다 — 설치할 때 사람이 한 번 넣어야 합니다."),
         "",
-        "  settings.json 의 permissions.allow 에 세 줄:",
+        "  settings.json 의 permissions.allow 에 (채널 감시를 쓰면 아래 두 줄까지):",
         "",
         '      "mcp__claude-slack-bridge",',
         '      "Bash(*claude-slack-bridge keeper-start*)",',
-        '      "Bash(*claude-slack-bridge monitor --thread *)"',
+        '      "Bash(*claude-slack-bridge monitor --thread *)",',
+        '      "Bash(*claude-slack-bridge monitor --channel *)",',
+        '      "Bash(*claude-slack-bridge monitor --discover*)"',
         "",
         "  분류기가 없는 환경(권한을 직접 승인하는 설정)이면 지금은 넘어가도 됩니다.",
         "  막히는 증상은 attach 나 Monitor 등록이 거부되는 것으로 나타납니다.",
@@ -285,9 +288,11 @@ def cmd_init(argv: list[str]) -> None:
     print(f"  봇 이름: {who.get('user')}\n")
 
     print("  Slack 에서 본인 프로필 → 더보기(⋮) → '멤버 ID 복사' 로 얻습니다.")
-    owner_id = input("내 멤버 ID (U 로 시작): ").strip()
-    if not owner_id:
+    print("  소유자가 여럿이면 쉼표로 구분합니다. 첫 사람이 대표 소유자(⚠️ 알림을 받음)입니다.")
+    owner_ids = cfg.parse_owner_ids(input("멤버 ID (U 로 시작): "))
+    if not owner_ids:
         _die("멤버 ID 가 비었습니다.")
+    owner_id = owner_ids[0]
     print()
 
     print("알림을 받을 곳을 고릅니다.")
@@ -339,7 +344,7 @@ def cmd_init(argv: list[str]) -> None:
     except slack.SlackError as e:
         _die(f"테스트 메시지 전송 실패.\n{e}")
 
-    path = cfg.save(token, channel, owner_id)
+    path = cfg.save(token, channel, owner_ids)
     print("테스트 메시지를 보냈습니다. 폰에서 확인해 보세요.")
     print(f"설정 저장: {path} (권한 600)\n")
     print("━━ 마지막 · Claude Code 에 붙이기 ━━\n")
@@ -371,9 +376,14 @@ def _apply_command(
     token, channel, thread, label, kind, value, state, actor_id="", owner_id="",
     scope="thread",
 ) -> bool:
-    """폰에서 온 지킴이 명령을 처리한다. 닫혔으면 True."""
+    """폰에서 온 지킴이 명령을 처리한다. 닫혔으면 True.
+
+    owner_id 는 소유자 한 명이거나 목록이다. 소유자는 모두 같은 권한을 갖는다.
+    """
     now = time.time()
-    if not channel.startswith("D") and (not owner_id or actor_id != owner_id):
+    owners = [owner_id] if isinstance(owner_id, str) else list(owner_id)
+    owners = [o for o in owners if o]
+    if not channel.startswith("D") and (not owners or actor_id not in owners):
         # 채널에서는 listener 도 수신 필터를 통과하므로, 지킴이 명령(핑·연장·
         # 마감·닫기·듣기)은 여기서 주인만 남긴다. 예전에는 필터가 주인만 통과시켜
         # 이 게이트가 필요 없었다. DM 은 상대가 한 사람이라 거를 것이 없다.
@@ -391,7 +401,8 @@ def _apply_command(
             thread_listeners = list(state.get("listeners") or [])
             if kind == "listeners":
                 people = ", ".join(f"<@{user_id}>" for user_id in thread_listeners)
-                local = f"<@{owner_id}>(주인), {people}" if people else "주인만"
+                bosses = ", ".join(f"<@{o}>" for o in owners)
+                local = f"{bosses}(주인), {people}" if people else "주인만"
                 shared = ", ".join(f"<@{user_id}>" for user_id in channel_listeners) or "주인만"
                 reply = f"이 스레드에서 듣는 사람: {local}\n채널 전체: {shared}"
             else:
@@ -484,7 +495,7 @@ def _apply_command(
 
     threads.patch(thread, deadline=new_deadline, warned=False)
     try:
-        slack.chat_update(token, channel, thread, chat.header_text(label, new_deadline))
+        slack.update_header(token, channel, thread, chat.header_text(label, new_deadline))
         slack.post_message(
             token, channel,
             f"마감을 {time.strftime('%H:%M', time.localtime(new_deadline))} 로 바꿨습니다 "
@@ -625,13 +636,12 @@ def cmd_keeper(argv: list[str]) -> None:
     try:
         # keeper-start 는 프로세스가 살아 있는지만 확인하고 돌아온다. 인증이 느린 날
         # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
-        identity = slack.auth_test(conf.bot_token)
-        bot_user_id = str(identity.get("user_id", ""))
-        bot_id = str(identity.get("bot_id") or "")
+        bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
         require_mention = bool(state.get("require_mention"))
         # 주인은 config.json 하나에서만 읽는다. 스레드 기록의 사본은 attach 경로가
         # 채우지 않아 비는 일이 있었고, 정본이 둘이면 어느 쪽이 맞는지부터 따져야 한다.
         owner_id = conf.owner_id
+        owners = conf.owner_ids
         seen = float(state.get("keeper_seen_ts") or state.get("last_seen_ts") or thread)
         # 에이전트 세션을 여기서 만든다. 열기·붙기·되살리기 어느 경로든 지킴이는
         # 반드시 뜨므로 한 곳이면 된다. initiator 를 붙이는 것이 핵심이다 — 없으면
@@ -750,7 +760,7 @@ def cmd_keeper(argv: list[str]) -> None:
             fresh = [
                 m for m in msgs
                 if float(m.get("ts", 0)) > seen
-                and chat.is_for_me(m, bot_user_id, owner_id, require_mention, listeners, bot_id)
+                and chat.is_for_me(m, bot_user_id, owners, require_mention, listeners, context=msgs)
             ]
             fresh.sort(key=lambda m: float(m.get("ts", 0)))
 
@@ -762,7 +772,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     if _apply_command(
                         conf.bot_token, channel, thread, label,
                         cmd[0], cmd[1], command_state,
-                        str(m.get("user") or ""), owner_id, scope=cmd[2],
+                        str(m.get("user") or ""), owners, scope=cmd[2],
                     ):
                         _log("CLOSED_BY_USER")
                         threads.append_inbox_event(thread, "THREAD_CLOSED")
@@ -786,7 +796,7 @@ def cmd_keeper(argv: list[str]) -> None:
                     new_deadline = base + chat.AUTO_EXTEND_HOURS * 3600
                     threads.patch(thread, deadline=new_deadline, warned=False)
                     try:
-                        slack.chat_update(
+                        slack.update_header(
                             conf.bot_token, channel, thread,
                             chat.header_text(label, new_deadline),
                         )
@@ -840,7 +850,7 @@ def cmd_keeper(argv: list[str]) -> None:
 
             _check_session_health(
                 conf.bot_token, channel, thread, msgs,
-                bot_user_id, owner_id, require_mention, listeners, health, bot_id=bot_id,
+                bot_user_id, owner_id, require_mention, listeners, health, owners=owners,
             )
 
             time.sleep(interval)
@@ -854,7 +864,7 @@ def cmd_keeper(argv: list[str]) -> None:
 
 def _effective_listeners(channel: str, state: dict) -> list[str]:
     """채널 전체 권한과 현재 스레드 권한만 합친다."""
-    return chat.effective_listeners(channel, state)
+    return list(dict.fromkeys(cfg.channel_listeners(channel) + (state.get("listeners") or [])))
 
 
 def _safe_patch(thread: str, **fields) -> bool:
@@ -918,7 +928,7 @@ def _check_session_health(
     require_mention: bool,
     listeners: list[str],
     cache: dict,
-    bot_id: str = "",
+    owners: list[str] | None = None,
 ) -> None:
     """세션이 사용자의 말을 받고 있는지 보고, 아니면 폰에 드러낸다.
 
@@ -953,7 +963,7 @@ def _check_session_health(
         mine = [
             float(m.get("ts", 0)) for m in msgs
             if chat.is_for_me(
-                m, bot_user_id, owner_id, require_mention, listeners, bot_id,
+                m, bot_user_id, owners or owner_id, require_mention, listeners,
             )
             and not chat.parse_command(
                 chat.strip_mention(m.get("text", ""), bot_user_id)
@@ -1101,9 +1111,15 @@ def cmd_monitor(argv: list[str]) -> None:
     죽을 때 고아 tail 이 inbox 를 계속 열어 두고, 수신자 판정(inbox_tailed)이 죽은
     세션을 듣는 중으로 오판한다. 파일을 열어 두는 주체가 이 프로세스 하나여야 한다.
     """
+    if _arg(argv, "--channel"):
+        cmd_channel_monitor(argv)
+        return
+    if "--discover" in argv:
+        cmd_discover(argv)
+        return
     thread = _arg(argv, "--thread")
     if not thread:
-        _die("--thread <스레드 ts> 가 필요합니다.")
+        _die("--thread <스레드 ts>, --channel <채널 ID>, --discover 중 하나가 필요합니다.")
     inbox = threads.ensure_inbox(thread)
 
     def emit(line: bytes) -> None:
@@ -1163,6 +1179,121 @@ def cmd_monitor(argv: list[str]) -> None:
         fh.close()
 
 
+def _emit_json(record: dict) -> None:
+    sys.stdout.buffer.write(json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def cmd_channel_monitor(argv: list[str]) -> None:
+    """채널 하나의 멘션을 흘리는 Monitor 루프.
+
+    스레드 monitor 와 달리 지킴이가 따로 없다. 채널에는 지킬 마감도, 답할 지킴이
+    명령도 없고, 멘션을 찾은 뒤의 일(작업 중 표시·30초 대체 답글·⚠️)은 세션이 그
+    스레드에 attach 하는 순간 기존 지킴이가 맡는다. 그래서 이 프로세스가 Slack 을
+    직접 읽고, 찾은 멘션을 inbox 에 먼저 적은 뒤(attach 의 origin 판정 근거) 흘린다.
+
+    같은 채널에 둘이 뜨면 같은 멘션을 두 번 흘리고 커서를 서로 민다. 잠금으로 막는다.
+    """
+    channel = _arg(argv, "--channel") or ""
+    interval = float(_arg(argv, "--interval") or channels.POLL)
+    conf = cfg.load()
+    if conf is None:
+        _die("설정이 없습니다.")
+    if channel.startswith("D"):
+        _die("DM 은 채널 감시 대상이 아닙니다. DM 은 스레드로 받습니다.")
+    if not conf.owner_id:
+        _die("owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
+
+    channels._ensure_dir()
+    lock = open(channels.lock_path(channel), "a")
+    try:
+        import fcntl
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _emit_json({"event": "ALREADY_WATCHING", "channel": channel})
+        return
+    except ImportError:   # pragma: no cover - Windows
+        pass
+
+    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+    state = channels.load_state(channel)
+    _emit_json({"event": "WATCHING", "channel": channel})
+    unreachable_since = 0.0
+    try:
+        while True:
+            try:
+                now = time.time()
+                history = slack.conversations_history(
+                    conf.bot_token, channel, channels.window_start(now)
+                )
+                found, state = channels.poll(
+                    channel, state, history,
+                    lambda parent, oldest: slack.conversations_replies(
+                        conf.bot_token, channel, parent, oldest=oldest
+                    ),
+                    bot_user_id, conf.owner_ids, cfg.channel_listeners(channel),
+                    channels.held_threads(channel), now,
+                )
+                for record in found:
+                    channels.append_inbox(channel, record)
+                    _emit_json(record)
+                    # 세션이 attach 하기 전에도 "작업 중" 을 먼저 켠다. 스레드 지킴이는 붙은
+                    # 뒤에야 뜨므로, 그 사이(세션이 일을 고르는 몇 초~수십 초)가 비어 있었다.
+                    # 세션이 그 스레드에 slack_notify 로 답하면 active 로 내려간다.
+                    slack.set_session_status(
+                        conf.bot_token, channel, record["thread_ts"], "processing",
+                        initiator_user_id=str(record.get("user") or conf.owner_id),
+                        title=str(record.get("text") or "")[:60],
+                    )
+                channels.save_state(channel, state)
+                if unreachable_since:
+                    _log(f"SLACK_BACK\t{_span(time.time() - unreachable_since)} 만에")
+                    unreachable_since = 0.0
+            except slack.SlackError as e:
+                if e.code in ("not_in_channel", "channel_not_found", "is_archived"):
+                    _emit_json({"event": "CHANNEL_GONE", "channel": channel, "error": e.code})
+                    return
+                if not unreachable_since:
+                    unreachable_since = time.time()
+                    print(f"SLACK_UNREACHABLE\t{e}".replace("\n", " "), file=sys.stderr, flush=True)
+                if e.code == "ratelimited":
+                    time.sleep(30)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+    finally:
+        lock.close()
+
+
+def cmd_discover(argv: list[str]) -> None:
+    """봇이 들어가 있는 채널을 흘린다. 처음엔 전부, 이후엔 새로 들어간 것만.
+
+    어느 채널을 감시할지는 세션이 정한다. 이 명령은 초대를 알아채는 데까지만 한다.
+    """
+    interval = float(_arg(argv, "--interval") or channels.DISCOVER_POLL)
+    conf = cfg.load()
+    if conf is None:
+        _die("설정이 없습니다.")
+    known: set[str] = set()
+    try:
+        while True:
+            try:
+                current = slack.my_conversations(conf.bot_token)
+                ids = {c["id"] for c in current}
+                for c in current:
+                    if c["id"] not in known:
+                        _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
+                                    "private": c["private"], "new": bool(known)})
+                for gone in known - ids:
+                    _emit_json({"event": "CHANNEL_GONE", "channel": gone})
+                known = ids
+            except slack.SlackError as e:
+                print(f"SLACK_UNREACHABLE\t{e}".replace("\n", " "), file=sys.stderr, flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+
+
 def cmd_targets(argv: list[str]) -> None:
     """보낼 수 있는 곳을 보여준다.
 
@@ -1173,7 +1304,7 @@ def cmd_targets(argv: list[str]) -> None:
         _die("설정이 없습니다.")
     print(f"기본값: {conf.channel}" + ("  (봇과의 DM)" if conf.channel.startswith("D") else ""))
     if conf.owner_id:
-        print(f"소유자: {conf.owner_id}  (채널에서는 소유자와 스레드 listeners·채널 전체 listeners의 멘션만 지시로 받음)")
+        print(f"소유자: {', '.join(conf.owner_ids)}  (첫 사람이 대표. 채널에서는 소유자와 스레드 listeners·채널 전체 listeners의 멘션만 지시로 받음)")
     elif not conf.channel.startswith("D"):
         print("경고: owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
     convs = slack.my_conversations(conf.bot_token)
@@ -1237,6 +1368,12 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge monitor --thread <ts>
                                  inbox 새 줄을 흘리고 60초마다 지킴이를 점검한다.
                                  open/attach 가 돌려주는 Claude Code Monitor 명령이다
+  claude-slack-bridge monitor --channel <ID>
+                                 채널 최상위와 기존 스레드 안의 @멘션(소유자·채널
+                                 listener)을 흘린다. 세션은 그 스레드에 attach 한다
+  claude-slack-bridge monitor --discover
+                                 봇이 들어간 채널을 흘리고, 이후 새로 초대되거나
+                                 빠진 채널을 알린다
   claude-slack-bridge targets    설정한 기본 목적지와 초대된 채널을 본다
   claude-slack-bridge doctor     현재 설정이 살아있는지 점검한다
 """

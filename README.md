@@ -59,6 +59,8 @@ claude mcp add claude-slack-bridge -s user -- \
 | `targets` | 설정한 기본 목적지와 봇이 들어간 채널 확인 |
 | `keeper-start --thread <ts>` | 지킴이 수동 기동·진단 (보통은 MCP 서버가 자동 기동) |
 | `monitor --thread <ts>` | inbox 새 줄을 흘리고 60초마다 지킴이 점검 (Claude Code Monitor 툴에 넣는 명령) |
+| `monitor --channel <ID>` | 채널 최상위·남의 스레드 안에서 처음 부르는 @멘션을 흘린다 (채널 감시) |
+| `monitor --discover` | 봇이 들어간 채널을 흘리고 새로 초대·제외된 채널을 알린다 |
 | `watch --thread <ts>` | tmux·Claude 밖에서 쓰는 폴백 감시자 |
 | `doctor` | 현재 설정이 살아있는지 점검 |
 
@@ -96,6 +98,9 @@ claude-slack-bridge manifest --name "내 비서"
 | `slack_wait_reply` | 답글이 올 때까지 기다렸다 돌려준다 |
 | `slack_chat_extend` | 마감을 미룬다 |
 | `slack_chat_close` | 스레드를 닫는다 (머리글에 취소선) |
+| `slack_channel_watch` | 채널을 감시 목록에 올리고 채널 Monitor 명령을 돌려준다 (소유자만) |
+| `slack_channel_unwatch` | 채널을 감시 목록에서 뺀다 |
+| `slack_channel_list` | 감시 중인 채널과 Monitor 명령. 재시작 뒤 감시 복구에 쓴다 |
 
 ## 세션은 스레드를 여러 개 쥘 수 있다
 
@@ -184,6 +189,26 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 말없이 꺼진 스레드와 죽은 스레드는 폰에서 구분되지 않는다. 마감으로 닫힌 스레드는
 `slack_chat_attach` 로 다시 열 수 있다. 끝으로 남는 것은 사람이 `닫기` 한 것뿐이다.
 
+## 채널 감시 — 스레드 밖에서 불렸을 때
+
+스레드 감시는 이미 연 스레드의 답글만 본다. 그래서 채널 최상위에서 봇을 처음 부르거나,
+남이 연 스레드 안에서 처음 부르면 아무도 몰랐다. `slack_channel_watch` 로 채널을 등록하면
+`monitor --channel <ID>` 가 그 채널을 10초마다 읽어 그런 멘션을 흘린다.
+
+- 소유자와 `채널 듣기` 로 끼운 사람의 @멘션만 온다. 필터는 스레드 지킴이와 같다.
+- 스레드 안 멘션은 최근 7일 안에 올라온 스레드만 본다. 부모의 `latest_reply` 가 바뀐
+  스레드만 열어 보므로 API 호출이 대화량에 비례하지 않는다.
+- 브리지가 이미 쥔 스레드는 건너뛴다. 그 답글은 그 스레드의 지킴이가 받는다.
+- 커서가 파일(`~/.claude-slack-bridge/channels/`)에 남아, Monitor 가 끊겼다 다시 떠도
+  그 사이 온 멘션을 이어서 흘린다. 감시 목록(`watched.json`)도 남아 재시작 뒤 그대로 복구한다.
+- 세션은 멘션의 `thread_ts` 에 `slack_chat_attach(origin=<멘션 ts>)` 로 붙는다. 이 origin 은
+  listener 의 멘션이어도 **그 멘션 자신의 스레드에 붙을 때만** 통과한다. 다른 스레드로
+  붙거나 옮기는 근거는 되지 않는다(경로 탈취 방지). 닫힌 스레드 안에서 다시 불려도 이 경로로
+  다시 열고, 지킴이 커서를 그 멘션까지 밀어 같은 말을 두 번 흘리지 않는다.
+
+권한 분류기를 쓰면 `Bash(*claude-slack-bridge monitor --channel *)` 와
+`Bash(*claude-slack-bridge monitor --discover*)` 도 허용 목록에 넣는다.
+
 ## 채널에서 쓸 때
 
 `slack_chat_open(channel="#팀채널")` 로 목적지를 지정한다. 생략하면 `init`에서 설정한
@@ -193,7 +218,7 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 채널에서는 옆에서 오가는 대화까지 지시가 되어 남이 무심코 쓴 말이 작업을 움직인다.
 그래서 **봇을 @멘션한 소유자와 소유자가 허용한 listener의 답글만** 지시로 받는다.
 봇도 listener로 지정할 수 있으며, 지정된 봇의 글도 우리 봇을 @멘션해야 받는다.
-서로를 listener로 넣은 두 에이전트 봇이 답마다 상대를 멘션하면 핑퐁 루프가 생길 수 있으니 한쪽만 listener로 둔다.
+봇끼리 멘션을 주고받는 루프는 `BOT_TURN_LIMIT=5`로 제한한다. 사람 발화 없이 봇 발화가 5개 이어지면 이후 봇 발화를 받지 않으며, 사람이 말하면 다시 센다.
 스레드 안의 `듣기 @사람`·`그만 @사람`은 그 스레드에만 적용한다. 목록은
 `~/.claude-slack-bridge/threads/<ts>.json`의 `listeners`에 저장하며 닫히면 비운다.
 `채널 듣기 @사람`·`채널 그만 @사람`을 명시하면 채널 전체의 모든 스레드에 적용하고,

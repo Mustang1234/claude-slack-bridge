@@ -53,6 +53,7 @@ class ListenerTests(unittest.TestCase):
         self.enterContext(patch.object(slack, "api", side_effect=AssertionError("Unexpected Slack API call")))
         self.post = self.enterContext(patch.object(slack, "post_message"))
         self.enterContext(patch.object(slack, "chat_update"))
+        self.enterContext(patch.object(slack, "update_header", return_value=True))
         self.enterContext(patch.object(slack, "set_session_status", return_value=False))
         threads.save("100.0", {"channel": "CCHAN", "closed": False, "deadline": time.time() + 3600, "require_mention": True})
         threads.save("200.0", {"channel": "CCHAN", "closed": False, "deadline": time.time() + 3600, "require_mention": True})
@@ -203,33 +204,25 @@ class ListenerTests(unittest.TestCase):
                 self.assertFalse(chat.is_for_me({**message, "text": "hello"}, "UBOT", "UOWNER", True, listeners))
         self.assertEqual(cli._effective_listeners("COTHER", threads.load("200.0")), [])
 
-    def test_bot_listener_filter(self):
+    def test_bot_listener_rejects_missing_mention_owner_and_system_messages(self):
         base = {"user": "UAGENT", "bot_id": "BAGENT", "text": "<@UBOT> hello"}
-        for subtype in (None, "bot_message"):
-            with self.subTest(subtype=subtype):
-                self.assertTrue(chat.is_for_me({**base, "subtype": subtype}, "UBOT", "UOWNER", True, ["UAGENT"], "BBOT"))
-        cases = [
-            ({**base, "text": "hello"}, "UOWNER", True, ["UAGENT"]),
-            (base, "UOWNER", True, []),
-            ({**base, "user": "UBOT"}, "UOWNER", True, ["UBOT"]),
-            ({**base, "bot_id": "BBOT"}, "UOWNER", True, ["UAGENT"]),
-            (base, "", True, ["UAGENT"]),
-            (base, "UOWNER", False, ["UAGENT"]),
-            ({**base, "user": ""}, "UOWNER", True, ["UAGENT"]),
-            ({**base, "subtype": "message_changed"}, "UOWNER", True, ["UAGENT"]),
-            ({**base, "subtype": "file_share"}, "UOWNER", True, ["UAGENT"]),
-            ({"subtype": "bot_message", "text": "<@UBOT> legacy"}, "UOWNER", True, ["UAGENT"]),
-        ]
-        for msg, owner, mention, listeners in cases:
-            with self.subTest(msg=msg, owner=owner, mention=mention):
-                self.assertFalse(chat.is_for_me(msg, "UBOT", owner, mention, listeners, "BBOT"))
+        for message, owners in (
+            ({**base, "text": "hello"}, ["UOWNER"]),
+            (base, []),
+            ({**base, "user": ""}, ["UOWNER"]),
+            ({**base, "subtype": "message_changed"}, ["UOWNER"]),
+            ({**base, "subtype": "file_share"}, ["UOWNER"]),
+            ({"subtype": "bot_message", "text": "<@UBOT> legacy"}, ["UOWNER"]),
+        ):
+            with self.subTest(message=message, owners=owners):
+                self.assertFalse(chat.is_for_me(message, "UBOT", owners, True, ["UAGENT"]))
 
     def test_bot_profile_only_requires_listener(self):
         message = {"user": "UAGENT", "bot_profile": {"id": "BAGENT"}, "text": "<@UBOT> hello"}
-        self.assertTrue(chat.is_for_me(message, "UBOT", "UOWNER", True, ["UAGENT"], "BBOT"))
-        self.assertFalse(chat.is_for_me(message, "UBOT", "UOWNER", True, [], "BBOT"))
+        self.assertTrue(chat.is_for_me(message, "UBOT", "UOWNER", True, ["UAGENT"]))
+        self.assertFalse(chat.is_for_me(message, "UBOT", "UOWNER", True, []))
 
-    def test_wait_reply_blocks_self_without_auth_bot_id(self):
+    def test_wait_reply_blocks_self_by_user_id(self):
         self.command("듣기 <@UBOT>")
         current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
         message = {"user": "UBOT", "bot_id": "BBOT", "text": "<@UBOT> self"}
@@ -238,8 +231,8 @@ class ListenerTests(unittest.TestCase):
              patch.object(slack, "auth_test", return_value={"user_id": "UBOT"}) as auth, \
              patch.object(chat, "poll_new", return_value=[message]) as poll:
             self.assertEqual(chat.wait_reply("test-token", "UBOT", 0), ("timeout", []))
-        auth.assert_called_once_with("test-token")
-        poll.assert_called_once_with("test-token", current)
+        auth.assert_not_called()
+        poll.assert_called_once_with("test-token", current, context=[])
 
     def test_wait_reply_channel_owner_requires_mention(self):
         current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
@@ -265,11 +258,11 @@ class ListenerTests(unittest.TestCase):
             self.assertFalse(cfg.CHANNELS_PATH.exists())
 
     def test_health_counts_only_allowed_bot_messages(self):
-        for bot, text, expected in (("BA", "<@UBOT> hello", True), ("BBOT", "<@UBOT> hello", False), ("BA", "hello", False), ("BA", "<@UBOT> 닫기", False)):
+        for bot, text, expected in (("BA", "<@UBOT> hello", True), ("BA", "hello", False), ("BA", "<@UBOT> 닫기", False)):
             threads.patch("100.0", down_since=0)
             msg = {"ts": str(time.time() - 600), "user": "UA", "bot_id": bot, "text": text}
             with patch.object(threads, "session_listening", return_value=True):
-                cli._check_session_health("test-token", "CCHAN", "100.0", [msg], "UBOT", "UOWNER", True, ["UA"], {}, bot_id="BBOT")
+                cli._check_session_health("test-token", "CCHAN", "100.0", [msg], "UBOT", "UOWNER", True, ["UA"], {})
             self.assertEqual(bool(threads.load("100.0").get("down_since")), expected)
 
     def test_wait_reply_uses_bot_listener_union(self):
@@ -284,13 +277,41 @@ class ListenerTests(unittest.TestCase):
                 ("UB", "<@UBOT> shared", "BB", True),
                 ("UA", "no mention", "BA", False),
                 ("UOTHER", "<@UBOT> denied", "BC", False),
-                ("UA", "<@UBOT> self", "BBOT", False),
+                ("UBOT", "<@UBOT> self", "BBOT", False),
             ):
-                msg = {"user": user, "text": text, "bot_id": bot, "subtype": "bot_message"}
+                msg = {"user": user, "text": text, "bot_id": bot}
                 with patch.object(chat, "poll_new", return_value=[msg]):
                     status, messages = chat.wait_reply("test-token", "UBOT", 0)
                 self.assertEqual(status, "messages" if accepted else "timeout")
                 self.assertEqual(messages, [msg] if accepted else [])
+
+    def test_wait_reply_preserves_bot_turn_limit_across_seen_messages(self):
+        self.command("듣기 <@UA>")
+        history = [{"ts": str(101 + i), "user": "UA", "bot_id": "BA", "text": "<@UBOT> hello"}
+                   for i in range(chat.BOT_TURN_LIMIT)]
+        candidate = {"ts": "110.0", "user": "UA", "bot_id": "BA", "text": "<@UBOT> again"}
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600,
+                            seen={m["ts"] for m in history})
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(slack, "conversations_replies", return_value=history + [candidate]) as replies:
+            self.assertEqual(chat.wait_reply("test-token", "UBOT", 0), ("timeout", []))
+            human = {"ts": "111.0", "user": "UOWNER", "text": "reset"}
+            later = {**candidate, "ts": "112.0"}
+            replies.return_value = history + [candidate, human, later]
+            self.assertEqual(chat.wait_reply("test-token", "UBOT", 0), ("messages", [later]))
+
+    def test_wait_reply_uses_co_owners_and_stored_mention_policy(self):
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER", co_owner_ids=["UCOOWNER"])):
+            for require_mention, text, accepted in ((True, "<@UBOT> hello", True), (True, "hello", False), (False, "hello", True)):
+                with self.subTest(require_mention=require_mention, text=text):
+                    threads.patch("100.0", require_mention=require_mention)
+                    message = {"user": "UCOOWNER", "text": text}
+                    with patch.object(chat, "poll_new", return_value=[message]):
+                        self.assertEqual(chat.wait_reply("test-token", "UBOT", 0),
+                                         ("messages", [message]) if accepted else ("timeout", []))
 
     def test_close_clears_thread_listeners_only(self):
         self.command("듣기 <@UA>")
@@ -313,7 +334,7 @@ class ListenerTests(unittest.TestCase):
         cfg.save_channel_listeners("CCHAN", ["UB"])
         messages = [
             [{"ts": "101.0", "user": "UOWNER", "text": "<@UBOT> 듣기 <@UA>"}],
-            [{"ts": "102.0", "user": "UA", "bot_id": "BA", "subtype": "bot_message", "text": "<@UBOT> local"},
+            [{"ts": "102.0", "user": "UA", "bot_id": "BA", "text": "<@UBOT> local"},
              {"ts": "103.0", "user": "UB", "bot_id": "BB", "text": "<@UBOT> shared"},
              {"ts": "104.0", "user": "UOTHER", "text": "<@UBOT> denied"}],
         ]
