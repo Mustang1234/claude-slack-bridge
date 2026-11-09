@@ -626,7 +626,7 @@ def cmd_keeper(argv: list[str]) -> None:
         # keeper-start 는 프로세스가 살아 있는지만 확인하고 돌아온다. 인증이 느린 날
         # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
         bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
-        require_mention = bool(state.get("require_mention"))
+        require_mention = not channel.startswith("D") or bool(state.get("require_mention"))
         # 주인은 config.json 하나에서만 읽는다. 스레드 기록의 사본은 attach 경로가
         # 채우지 않아 비는 일이 있었고, 정본이 둘이면 어느 쪽이 맞는지부터 따져야 한다.
         owner_id = conf.owner_id

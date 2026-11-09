@@ -300,17 +300,52 @@ class ListenerTests(unittest.TestCase):
             replies.return_value = history + [candidate, human, later]
             self.assertEqual(chat.wait_reply("test-token", "UBOT", 0), ("messages", [later]))
 
-    def test_wait_reply_uses_owner_and_stored_mention_policy(self):
+    def test_wait_reply_channel_requires_mention_even_when_state_false(self):
         current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
         with patch.object(chat, "current", return_value=current), \
              patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")):
-            for require_mention, text, accepted in ((True, "<@UBOT> hello", True), (True, "hello", False), (False, "hello", True)):
+            for require_mention, text, accepted in ((True, "<@UBOT> hello", True), (True, "hello", False), (False, "hello", False)):
                 with self.subTest(require_mention=require_mention, text=text):
                     threads.patch("100.0", require_mention=require_mention)
                     message = {"user": "UOWNER", "text": text}
                     with patch.object(chat, "poll_new", return_value=[message]):
                         self.assertEqual(chat.wait_reply("test-token", "UBOT", 0),
                                          ("messages", [message]) if accepted else ("timeout", []))
+
+    def test_wait_reply_missing_state_keeps_channel_filter(self):
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(threads, "load", return_value=None):
+            for user, text, accepted in (
+                ("UOTHER", "hello", False),
+                ("UOTHER", "<@UBOT> hello", False),
+                ("UOWNER", "hello", False),
+                ("UOWNER", "<@UBOT> hello", True),
+            ):
+                with self.subTest(user=user, text=text):
+                    message = {"user": user, "text": text}
+                    with patch.object(chat, "poll_new", return_value=[message]):
+                        self.assertEqual(chat.wait_reply("test-token", "UBOT", 0),
+                                         ("messages", [message]) if accepted else ("timeout", []))
+
+    def test_keeper_channel_requires_mention_even_when_state_false(self):
+        threads.patch("100.0", require_mention=False)
+        messages = [
+            {"ts": "101.0", "user": "UOTHER", "text": "hello"},
+            {"ts": "102.0", "user": "UOTHER", "text": "<@UBOT> hello"},
+            {"ts": "103.0", "user": "UOWNER", "text": "hello"},
+            {"ts": "104.0", "user": "UOWNER", "text": "<@UBOT> hello"},
+        ]
+        with patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(cli, "_keep_awake", return_value=None), \
+             patch.object(slack, "auth_test", return_value={"user_id": "UBOT"}), \
+             patch.object(slack, "conversations_replies", return_value=messages), \
+             patch.object(cli, "_check_session_health"), \
+             patch.object(cli.time, "sleep", side_effect=lambda _: threads.patch("100.0", closed=True)), \
+             patch.object(cli, "_log"):
+            cli.cmd_keeper(["--thread", "100.0"])
+        self.assertEqual([m["ts"] for m in threads.read_inbox("100.0", 0)], ["104.0"])
 
     def test_close_clears_thread_listeners_only(self):
         self.command("듣기 <@UA>")
