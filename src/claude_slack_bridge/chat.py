@@ -19,6 +19,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from . import config as cfg
 from . import slack
 from . import threads
 
@@ -617,12 +618,14 @@ def describe(msg: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def poll_new(token: str, chat: Chat) -> list[dict]:
+def poll_new(token: str, chat: Chat, context: list[dict] | None = None) -> list[dict]:
     """스레드에서 아직 못 본 메시지를 가져온다.
 
     스레드만 본다. 그래야 세션 넷이 같은 DM 을 써도 서로의 답장을 집어가지 않는다.
     """
     msgs = slack.conversations_replies(token, chat.channel, chat.thread_ts)
+    if context is not None:
+        context.extend(msgs)
     fresh = []
     for m in msgs:
         ts = m.get("ts", "")
@@ -638,11 +641,13 @@ def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | No
     """답장이 올 때까지 블로킹한다.
 
     반환하는 상태는 셋이다.
-      messages — 사람 답장이 왔다
+      messages — 허용된 발신자의 답장이 왔다
       timeout  — 이번 대기 시간 안에는 안 왔다 (스레드는 그대로 살아있다)
       closed   — 마감이 지나 스레드가 닫혔다
     """
     chat = current(thread_ts)
+    conf = cfg.load() if not chat.channel.startswith("D") else None
+    owners = conf.owner_ids if conf else []
     until = time.time() + timeout
     fails = 0
 
@@ -671,7 +676,16 @@ def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | No
             threads.patch(chat.thread_ts, warned=True)
 
         try:
-            fresh = [m for m in poll_new(token, chat) if is_human(m, bot_user_id)]
+            require_mention = bool(state.get("require_mention"))
+            listeners = list(dict.fromkeys(
+                cfg.channel_listeners(chat.channel) + (state.get("listeners") or [])
+            )) if not chat.channel.startswith("D") else []
+            context = []
+            candidates = poll_new(token, chat, context=context)
+            fresh = [
+                m for m in candidates
+                if is_for_me(m, bot_user_id, owners, require_mention, listeners, context=context)
+            ]
             fails = 0
         except slack.SlackError:
             # 단발 실패는 넘어간다. 커서를 그대로 두고 다음 주기에 다시 긁으므로
