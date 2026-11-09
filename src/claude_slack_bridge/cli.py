@@ -1198,6 +1198,8 @@ def _publish_records(conf, channel, records):
             _emit_json(record)
         if not channels.deliver_once(channel, record["thread_ts"], record["ts"], write):
             continue
+        if not record.get("mentioned", True):
+            continue
         slack.set_session_status(
             conf.bot_token, channel, record["thread_ts"], "processing",
             initiator_user_id=str(record.get("user") or conf.owner_id),
@@ -1214,13 +1216,13 @@ def _channel_command(conf, channel, bot_user_id, message, parent, listeners):
         return False
     # 명령 결과는 일반 inbox로 전달하지 않는다. 기존 문구·owner 게이트를 재사용한다.
     key = f"commands-{channel}"
-    done = channels.load_state(key)
+    done = channels.recent_ledger(key)
     ts = str(message.get("ts") or "")
     if ts not in done:
         _apply_command(conf.bot_token, channel, parent, "", command[0], command[1],
                        threads.load(parent) or {}, str(message.get("user") or ""),
                        conf.owner_ids, scope="channel")
-        done[ts] = True
+        done[ts] = time.time()
         channels.save_state(key, done)
     listeners[:] = cfg.channel_listeners(channel)
     return True
@@ -1282,8 +1284,13 @@ def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_i
     originals = {str(message.get("ts")): message for message in replies}
     found = [record for record in found if not _channel_command(
         conf, channel, bot_user_id, originals[record["ts"]], thread, listeners)]
-    _publish_records(conf, channel, found)
-    channels.save_state(key, next_state)
+    with channels.unchanged_tracking(key, state) as unchanged:
+        if not unchanged:
+            return
+        if "generation" in state:
+            next_state["generation"] = state["generation"]
+        _publish_records(conf, channel, found)
+        channels.save_state(key, next_state)
 
 
 def _discover_once(conf, known, register=False, initialized=None):
@@ -1318,8 +1325,17 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
     # 한 대상의 어떤 오류도 나머지 감시를 멈추지 않는다. KeyboardInterrupt 는 Exception 이 아니라 빠져나간다.
     errors = (Exception,)
 
+    failed = set()
+
     def report(target, exc):
-        print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
+        if target not in failed:
+            print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
+            failed.add(target)
+
+    def recovered(target):
+        if target in failed:
+            print(f"SLACK_BACK\t{target}", file=sys.stderr, flush=True)
+            failed.remove(target)
 
     try:
         while True:
@@ -1328,10 +1344,13 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                     known = _discover_once(conf, known, register=initialized, initialized=initialized)
                     initialized = True
                     channels.save_state("discovery", {"ids": sorted(known)})
+                    recovered("discovery")
                 except errors as exc:
                     report("discovery", exc)
                 next_discovery = time.monotonic() + channels.DISCOVER_POLL
             tracked = channels.valid_tracked(report)
+            for item in tracked:
+                recovered("tracked:" + channels.thread_key(item["channel"], item["thread_ts"]))
             targets = {channel} if channel else set(channels.watched()) | {
                 item["channel"] for item in tracked if item["channel"] in known}
             jobs = []
@@ -1371,6 +1390,16 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                         _poll_channel_once(conf, target, bot_user_id, tracked=tracked)
                 except errors as exc:
                     report(key, exc)
+                    if isinstance(exc, slack.SlackError) and exc.code == "thread_not_found" and parent:
+                        try:
+                            channels.set_tracked(target, parent, False)
+                            _emit_json({"event": "THREAD_GONE", "channel": target, "thread_ts": parent})
+                        except errors as cleanup_error:
+                            report(key + ":cleanup", cleanup_error)
+                        if key in locks:
+                            locks.pop(key).close()
+                        if thread:
+                            return
                     if isinstance(exc, slack.SlackError) and exc.code in ("not_in_channel", "channel_not_found", "is_archived"):
                         try:
                             channels.set_watched(target, False)
@@ -1382,6 +1411,8 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                             locks.pop(key).close()
                         if channel:
                             return
+                else:
+                    recovered(key)
             time.sleep(max(1.0, interval))
     except KeyboardInterrupt:
         return

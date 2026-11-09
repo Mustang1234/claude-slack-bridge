@@ -301,6 +301,7 @@ def _pages(token: str, method: str, payload: dict, field: str, max_pages=None, p
     count = 0
     if page_state and page_state.get("cursor"):
         payload["cursor"] = page_state["cursor"]
+        seen.add(page_state["cursor"])
     while True:
         data = api(token, method, payload, form=True)
         count += 1
@@ -308,10 +309,12 @@ def _pages(token: str, method: str, payload: dict, field: str, max_pages=None, p
         cursor = (data.get("response_metadata") or {}).get("next_cursor", "").strip()
         if page_state is not None:
             page_state["cursor"] = cursor
-        if not cursor or (max_pages is not None and count >= max_pages):
+        if not cursor:
             return out
         if cursor in seen:
             raise SlackError("pagination_loop", method)
+        if max_pages is not None and count >= max_pages:
+            return out
         seen.add(cursor)
         payload["cursor"] = cursor
 

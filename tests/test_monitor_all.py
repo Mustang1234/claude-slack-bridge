@@ -532,3 +532,84 @@ class MonitorTests(unittest.TestCase):
             cli._poll_channel_once(self.conf, "C1", "UBOT")
         self.assertEqual(channels.load_state("C1")["cursor"], "120")
         self.assertEqual([c.args[0]["ts"] for c in self.emit.call_args_list], ["120", "110"])
+
+    def test_ledgers_prune_entries_older_than_seven_days(self):
+        now = 1000000
+        for key in ("delivered-C1", "commands-C1"):
+            channels.save_state(key, {"old": now-8*86400, "new": now-60, "1": True})
+            with patch.object(channels.time, "time", return_value=now):
+                self.assertEqual(channels.recent_ledger(key), {"new": now-60})
+            self.assertEqual(channels.load_state(key), {"new": now-60})
+
+    def test_any_reply_only_sets_processing_for_mentions(self):
+        channels.save_state(channels.thread_key("C1", "1.0"), {"cursor": "100"})
+        with patch.object(slack, "conversations_replies", return_value=[message(101, text="hello")]), \
+             patch.object(slack, "set_session_status") as status:
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT", any_reply=True)
+        self.emit.assert_called_once()
+        status.assert_not_called()
+        with patch.object(slack, "conversations_replies", return_value=[message(102)]), \
+             patch.object(slack, "set_session_status") as status:
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT", any_reply=True)
+        status.assert_called_once()
+
+    def test_outage_logs_once_and_recovery_once(self):
+        channels.set_watched("C1", True)
+        rounds = []
+        def sleep(seconds):
+            rounds.append(1)
+            if len(rounds) == 4:
+                raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once", side_effect=[OSError("disk"), OSError("disk"), None, None]), \
+             patch.object(cli.time, "sleep", side_effect=sleep), \
+             patch.object(cli, "print") as log:
+            cli.cmd_monitor(["--all"])
+        self.assertEqual([c.args[0].split("\t")[0] for c in log.call_args_list], ["SLACK_UNREACHABLE", "SLACK_BACK"])
+
+    def test_missing_thread_is_untracked_with_event(self):
+        channels.set_tracked("C1", "1.0", True)
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_thread_once", side_effect=slack.SlackError("thread_not_found", "replies")), \
+             patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt), \
+             patch.object(cli, "print"):
+            cli.cmd_monitor(["--all"])
+        self.assertEqual(channels.tracked(), {})
+        self.assertFalse(channels.state_path(channels.thread_key("C1", "1.0")).exists())
+        self.assertEqual(sum(c.args[0].get("event") == "THREAD_GONE" for c in self.emit.call_args_list), 1)
+
+    def test_bad_tracked_entry_warns_once_without_blocking_channels(self):
+        channels.set_watched("C1", True)
+        channels.save_state("tracked", {"broken": {"channel": "C1"}})
+        rounds = []
+        def sleep(seconds):
+            rounds.append(1)
+            if len(rounds) == 2:
+                raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(slack, "conversations_history", return_value=[]), \
+             patch.object(cli.time, "sleep", side_effect=sleep), \
+             patch.object(cli, "print") as log:
+            cli.cmd_monitor(["--all"])
+        self.assertEqual(log.call_count, 1)
+        self.assertIn("tracked:broken", log.call_args.args[0])
+        self.assertTrue(channels.load_state("C1"))
+
+    def test_inflight_poll_cannot_resurrect_untracked_or_overwrite_retrack(self):
+        key = channels.thread_key("C1", "1.0")
+        for retrack in (False, True):
+            with patch.object(channels.time, "time", return_value=100):
+                channels.set_tracked("C1", "1.0", True)
+            def fetch(*args, **kwargs):
+                channels.set_tracked("C1", "1.0", False)
+                if retrack:
+                    with patch.object(channels.time, "time", return_value=200):
+                        channels.set_tracked("C1", "1.0", True)
+                return [message(150)]
+            with patch.object(slack, "conversations_replies", side_effect=fetch):
+                cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+            self.emit.assert_not_called()
+            if retrack:
+                self.assertEqual(channels.load_state(key)["cursor"], "200.000000")
+            else:
+                self.assertFalse(channels.state_path(key).exists())

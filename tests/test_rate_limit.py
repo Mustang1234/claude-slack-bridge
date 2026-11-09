@@ -187,3 +187,19 @@ class RateTests(unittest.TestCase):
                     state["next"] = 1000000
                 with ratelimit._state("t", "read") as state:
                     self.assertEqual(state["next"], 400)
+
+    def test_history_fetches_one_page_and_keeps_continuation(self):
+        paging = {}
+        with patch.object(slack, "api", return_value={"messages": [{"ts": "200"}],
+                "response_metadata": {"next_cursor": "next"}}) as api:
+            self.assertEqual(slack.conversations_history("t", "C1", "100", max_pages=1, page_state=paging), [{"ts": "200"}])
+        api.assert_called_once()
+        self.assertEqual(api.call_args.args[2]["oldest"], "100")
+        self.assertEqual(paging, {"cursor": "next"})
+
+    def test_channel_replies_stop_at_three_pages(self):
+        responses = [{"messages": [{"ts": str(i)}], "response_metadata": {"next_cursor": str(i)}} for i in range(1, 5)]
+        with patch.object(slack, "api", side_effect=responses) as api:
+            messages = slack.conversations_replies("t", "C1", "0", oldest="0", max_pages=3)
+        self.assertEqual(api.call_count, 3)
+        self.assertEqual([m["ts"] for m in messages], ["1", "2", "3"])

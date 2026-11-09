@@ -212,7 +212,8 @@ DM 으로 나간다.
 안에서 처음 부르는 멘션은 **채널 감시**가 잡는다. `slack_channel_watch(channel, origin)` 로
 등록하면 목록(`~/.claude-slack-bridge/channels/watched.json`)에 남는다. 등록은 소유자만
 할 수 있다(origin 규칙은 attach 와 같다). **채널 감시는 `monitor --all` 하나만 Monitor로
-띄운다.** watched 채널과 명시 추적 스레드를 함께 순회하고, 새로 초대된 채널은 자동 등록한다.
+띄운다.** watched 채널과 명시 추적 스레드를 함께 순회한다. 첫 실행은 가입 목록을 기준선으로만
+저장하고, 이후 새 채널은 합류 시점부터 자동 감시한다.
 기존 --channel 감시는 먼저 내려 잠금을 넘긴다. 세션 재시작·Monitor 만료 시 --all 하나를
 다시 띄운다. 열린 스레드의 기존 inbox Monitor(--thread)는 별도로 유지한다.
 

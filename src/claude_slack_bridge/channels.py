@@ -17,6 +17,7 @@ latest_reply 가 바뀐 것만 conversations.replies 로 연다. 브리지가 �
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import stat
@@ -81,6 +82,7 @@ def mention_record(channel: str, msg: dict, bot_user_id: str, parent: str | None
     """세션에 흘릴 한 줄. thread_ts 는 attach 할 스레드다 — 최상위면 그 메시지 자신."""
     return {
         "source": "channel",
+        "mentioned": f"<@{bot_user_id}>" in (msg.get("text") or ""),
         "channel": channel,
         "ts": msg.get("ts", ""),
         "thread_ts": parent or msg.get("ts", ""),
@@ -281,7 +283,7 @@ def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) ->
         data = tracked()
         if on:
             data[key] = {"channel": channel, "thread_ts": thread, "any_reply": any_reply}
-            save_state(key, {"cursor": f"{time.time():.6f}", "bot_streak": 0})
+            save_state(key, {"cursor": f"{time.time():.6f}", "bot_streak": 0, "generation": time.time_ns()})
         else:
             data.pop(key, None)
             state_path(key).unlink(missing_ok=True)
@@ -328,7 +330,7 @@ def deliver_once(channel, thread, message_ts, write):
     key = f"delivered-{channel}"
     with open(lock_path(key), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        delivered = load_state(key)
+        delivered = recent_ledger(key)
         ts = str(message_ts)
         if ts in delivered:
             return False
@@ -349,7 +351,7 @@ def deliver_once(channel, thread, message_ts, write):
                 pass
         if not already:
             write()
-        delivered[ts] = True
+        delivered[ts] = time.time()
         save_state(key, delivered)
         return not already
 
@@ -367,3 +369,31 @@ def valid_tracked(on_error=None):
             if on_error:
                 on_error(f"tracked:{key}", exc)
     return result
+
+
+def recent_ledger(key):
+    """전달・명령 원장은 처리 시각 기준 7일만 보관한다. 옛 bool 값은 ts로 이관한다."""
+    import math
+    data = load_state(key)
+    cutoff = time.time() - THREAD_WINDOW
+    recent = {}
+    for ts, value in data.items():
+        try:
+            stamp = float(ts if isinstance(value, bool) else value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(stamp) and stamp >= cutoff:
+            recent[ts] = stamp
+    if recent != data:
+        save_state(key, recent)
+    return recent
+
+
+@contextmanager
+def unchanged_tracking(key, snapshot):
+    """조회 도중 해제/재등록됐다면 이전 조회가 새 커서를 덮어쓰지 않는다."""
+    import fcntl
+    _ensure_dir()
+    with open(CHANNELS_DIR / "tracked-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield load_state(key) == snapshot
