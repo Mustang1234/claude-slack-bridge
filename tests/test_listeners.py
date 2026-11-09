@@ -224,6 +224,36 @@ class ListenerTests(unittest.TestCase):
             with self.subTest(msg=msg, owner=owner, mention=mention):
                 self.assertFalse(chat.is_for_me(msg, "UBOT", owner, mention, listeners, "BBOT"))
 
+    def test_bot_profile_only_requires_listener(self):
+        message = {"user": "UAGENT", "bot_profile": {"id": "BAGENT"}, "text": "<@UBOT> hello"}
+        self.assertTrue(chat.is_for_me(message, "UBOT", "UOWNER", True, ["UAGENT"], "BBOT"))
+        self.assertFalse(chat.is_for_me(message, "UBOT", "UOWNER", True, [], "BBOT"))
+
+    def test_wait_reply_blocks_self_without_auth_bot_id(self):
+        self.command("듣기 <@UBOT>")
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
+        message = {"user": "UBOT", "bot_id": "BBOT", "text": "<@UBOT> self"}
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(slack, "auth_test", return_value={"user_id": "UBOT"}) as auth, \
+             patch.object(chat, "poll_new", return_value=[message]) as poll:
+            self.assertEqual(chat.wait_reply("test-token", "UBOT", 0), ("timeout", []))
+        auth.assert_called_once_with("test-token")
+        poll.assert_called_once_with("test-token", current)
+
+    def test_wait_reply_channel_owner_requires_mention(self):
+        current = chat.Chat(channel="CCHAN", thread_ts="100.0", deadline=time.time() + 3600)
+        with patch.object(chat, "current", return_value=current), \
+             patch.object(cfg, "load", return_value=cfg.Config("test-token", "CCHAN", "UOWNER")), \
+             patch.object(slack, "auth_test", return_value={"user_id": "UBOT", "bot_id": "BBOT"}):
+            for text, accepted in (("<@UBOT> hello", True), ("hello", False)):
+                with self.subTest(text=text):
+                    message = {"user": "UOWNER", "text": text}
+                    with patch.object(chat, "poll_new", return_value=[message]):
+                        status, messages = chat.wait_reply("test-token", "UBOT", 0)
+                    self.assertEqual(status, "messages" if accepted else "timeout")
+                    self.assertEqual(messages, [message] if accepted else [])
+
     def test_bot_listener_commands_cannot_mutate_state(self):
         self.command("듣기 <@UAGENT>")
         before = threads.load("100.0")
