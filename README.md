@@ -19,14 +19,32 @@ Socket Mode 나 Events API 를 쓰면 토큰이 둘로 늘고 설치 단계가 �
 
 ## 설치
 
+### personal 과 team 중 고르기
+
+이 레포는 용도가 다른 브리지 두 가지를 함께 배포한다. **태그로 고른다.**
+
+| | personal | team |
+|---|---|---|
+| 용도 | 혼자 쓰는 개인 에이전트 | 팀 채널에서 여러 사람·에이전트가 같이 쓰는 팀 에이전트 |
+| 브랜치 | `main` | `team` |
+| 태그 | `v<버전>` (예: `v1.4.4`) | `team-v<버전>` (예: `team-v1.5.0`) |
+| team 에만 있는 기능 | — | 채널 멘션 모니터, 복수 owner, 머리글 보호 |
+
+아래 명령의 `<태그>` 를 고른 쪽의 **최신 태그**로 바꾼다. 태그 목록은
+[Tags](https://github.com/Mustang1234/claude-slack-bridge/tags) 에 있다.
+
+- 태그 없이 받으면 `main` 의 개발 중인 코드가 설치된다. 쓰는 용도의 stable 태그를 고정한다.
+- personal ↔ team 을 바꿀 때도 태그만 바꾸면 된다. 버전이 다르므로 uvx 가 새로 설치한다.
+  `init` 과 `claude mcp add` 의 태그는 같은 것으로 맞춘다.
+
 ```bash
 # 1) Slack 앱 등록 + 토큰 발급 + 멤버 ID와 목적지 준비 — docs/SETUP.md 참고
 # 2) 설정하고 연결까지 확인
-uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge init
+uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge init
 
 # 3) Claude Code 에 붙이기
 claude mcp add claude-slack-bridge -s user -- \
-  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge
+  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge
 ```
 
 `-s user` 는 모든 프로젝트에서 쓰겠다는 뜻이다. 알림은 어느 프로젝트에서 일하든
@@ -192,8 +210,8 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 채널은 DM 과 신뢰 모델이 다르다. 사람이 쓴 것이면 전부 사용자의 말인 DM 과 달리,
 채널에서는 옆에서 오가는 대화까지 지시가 되어 남이 무심코 쓴 말이 작업을 움직인다.
 그래서 **봇을 @멘션한 소유자와 소유자가 허용한 listener의 답글만** 지시로 받는다.
-봇도 listener로 지정할 수 있으며, 지정된 봇의 글도 우리 봇을 @멘션해야 받는다.
-서로를 listener로 넣은 두 에이전트 봇이 답마다 상대를 멘션하면 핑퐁 루프가 생길 수 있으니 한쪽만 listener로 둔다.
+봇 사용자(bot user)도 listener로 지정할 수 있으며, 지정된 봇의 글도 우리 봇을 @멘션해야 받는다. 사용자 ID 없는 레거시 integration은 지원하지 않는다.
+봇끼리 멘션을 주고받는 루프는 `BOT_TURN_LIMIT=5`로 제한한다. 사람 발화 없이 봇 발화가 5개 이어지면 이후 봇 발화를 받지 않으며, 사람이 말하면 다시 센다.
 스레드 안의 `듣기 @사람`·`그만 @사람`은 그 스레드에만 적용한다. 목록은
 `~/.claude-slack-bridge/threads/<ts>.json`의 `listeners`에 저장하며 닫히면 비운다.
 `채널 듣기 @사람`·`채널 그만 @사람`을 명시하면 채널 전체의 모든 스레드에 적용하고,
