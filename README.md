@@ -393,7 +393,7 @@ MIT. 자세한 내용은 [LICENSE](LICENSE) 참고.
 테스트는 레포 안의 임시 디렉터리에 상태를 격리하며 실제 설정이나 Slack에 접근하지 않는다.
 
 
-### 1.6.0으로 올릴 때 허용 목록 확인
+### 1.6 으로 올릴 때 허용 목록 확인
 
 기존 설치의 Claude Code 권한 허용 목록에 새 감시 명령이 없으면 기동이 막힐 수 있다.
 사용자가 `permissions.allow`에 아래 두 줄을 추가한다. 기존 --thread 허용도 유지한다.
@@ -403,4 +403,4 @@ MIT. 자세한 내용은 [LICENSE](LICENSE) 참고.
 "Bash(*claude-slack-bridge monitor --thread-poll *)"
 ```
 
-운영 변경과 제한은 [1.6.0 릴리스 노트](docs/RELEASES.md)를 참고한다.
+운영 변경과 제한은 [1.6 릴리스 노트](docs/RELEASES.md)를 참고한다.

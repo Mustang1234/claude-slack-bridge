@@ -263,7 +263,7 @@ Slack URL을 목적지로 받으면 채널 URL은 그 채널에 새 스레드를
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.6.0",
+    version="1.6.1",
     instructions=INSTRUCTIONS,
 )
 
