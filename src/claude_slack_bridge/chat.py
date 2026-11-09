@@ -19,6 +19,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from . import config as cfg
 from . import slack
 from . import threads
 
@@ -535,6 +536,7 @@ def is_for_me(
     owner_id: str = "",
     require_mention: bool = False,
     listeners: list[str] | None = None,
+    bot_id: str = "",
 ) -> bool:
     """이 메시지를 내 세션에 대한 지시로 받아들일지 판정한다.
 
@@ -550,7 +552,21 @@ def is_for_me(
     채널인데 소유자가 없으면 아무 지시도 받지 않는다. 이 상태는 지킴이가
     스레드에 한 번 경고해 고장과 구분되게 한다.
     """
-    if not is_human(msg, bot_user_id):
+    is_bot = bool(msg.get("bot_id") or msg.get("bot_profile") or msg.get("subtype") == "bot_message")
+    if msg.get("user") == bot_user_id or (bot_id and msg.get("bot_id") == bot_id):
+        return False
+    if is_bot:
+        # DM은 기존대로 봇을 받지 않는다. bot_message 외 시스템 subtype도 거른다.
+        # user 없는 레거시 integration은 listener의 사용자 ID로 인증할 수 없다.
+        if not require_mention or not owner_id:
+            return False
+        if not msg.get("user") or msg["user"] not in (listeners or []):
+            return False
+        if msg.get("subtype") not in (None, "", "bot_message"):
+            return False
+        if not (msg.get("text") or msg.get("files")):
+            return False
+    elif not is_human(msg, bot_user_id):
         return False
     if require_mention:
         if not owner_id:
@@ -599,15 +615,24 @@ def poll_new(token: str, chat: Chat) -> list[dict]:
     return fresh
 
 
+def effective_listeners(channel: str, state: dict) -> list[str]:
+    """스레드와 채널에서 허용한 발신자의 합집합."""
+    return list(dict.fromkeys(cfg.channel_listeners(channel) + (state.get("listeners") or [])))
+
+
 def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | None = None) -> tuple[str, list[dict]]:
     """답장이 올 때까지 블로킹한다.
 
     반환하는 상태는 셋이다.
-      messages — 사람 답장이 왔다
+      messages — 허용된 발신자의 답장이 왔다
       timeout  — 이번 대기 시간 안에는 안 왔다 (스레드는 그대로 살아있다)
       closed   — 마감이 지나 스레드가 닫혔다
     """
     chat = current(thread_ts)
+    require_mention = not chat.channel.startswith("D")
+    conf = cfg.load() if require_mention else None
+    owner_id = conf.owner_id if conf else ""
+    bot_id = str(slack.auth_test(token).get("bot_id") or "") if require_mention else ""
     until = time.time() + timeout
     fails = 0
 
@@ -636,7 +661,11 @@ def wait_reply(token: str, bot_user_id: str, timeout: float, thread_ts: str | No
             threads.patch(chat.thread_ts, warned=True)
 
         try:
-            fresh = [m for m in poll_new(token, chat) if is_human(m, bot_user_id)]
+            listeners = effective_listeners(chat.channel, state) if require_mention else []
+            fresh = [
+                m for m in poll_new(token, chat)
+                if is_for_me(m, bot_user_id, owner_id, require_mention, listeners, bot_id)
+            ]
             fails = 0
         except slack.SlackError:
             # 단발 실패는 넘어간다. 커서를 그대로 두고 다음 주기에 다시 긁으므로
