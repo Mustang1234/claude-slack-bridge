@@ -36,7 +36,7 @@ FIRST_BACKFILL = 30 * 60    # 처음 띄울 때 거슬러 보는 시간
 
 
 def _safe(channel: str) -> str:
-    return "".join(ch for ch in channel if ch.isalnum())
+    return "".join(ch for ch in channel if ch.isalnum() or ch in "-_")
 
 
 def state_path(channel: str) -> Path:
@@ -110,6 +110,7 @@ def poll(
     listeners: list[str],
     held: set[str],
     now: float,
+    handle_message=None,
 ) -> tuple[list[dict], dict]:
     """한 번의 폴링 판정. Slack 호출은 밖에서 넣어 시험할 수 있게 한다.
 
@@ -132,7 +133,11 @@ def poll(
             continue
         if float(ts) > float(cursor):
             cursor = ts
-            if for_me(m):
+            if ts in held:
+                continue
+            if handle_message and handle_message(m, ts):
+                pass
+            elif for_me(m):
                 out.append(mention_record(channel, m, bot_user_id, None))
 
         latest = m.get("latest_reply")
@@ -153,6 +158,8 @@ def poll(
         for r in replies:
             rts = str(r.get("ts", ""))
             if rts == ts or (last and float(rts) <= float(last)):
+                continue
+            if handle_message and handle_message(r, ts):
                 continue
             if chat.is_for_me(r, bot_user_id, owner_id, require_mention=True,
                               listeners=listeners, context=replies):
@@ -196,6 +203,14 @@ def watched() -> dict[str, dict]:
 
 
 def set_watched(channel: str, on: bool, name: str = "") -> dict[str, dict]:
+    import fcntl
+    _ensure_dir()
+    with open(CHANNELS_DIR / "watched-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _set_watched(channel, on, name)
+
+
+def _set_watched(channel: str, on: bool, name: str) -> dict[str, dict]:
     _ensure_dir()
     data = watched()
     if on:
@@ -217,3 +232,71 @@ def monitor_command(channel: str | None) -> list[str]:
 
 def window_start(now: float | None = None) -> str:
     return f"{(now or time.time()) - THREAD_WINDOW:.6f}"
+
+
+TRACKED_NAME = "tracked.json"
+
+
+def acquire_lock(channel: str):
+    """채널별 단일 scanner. --all/--channel/--thread-poll 모두 같은 잠금."""
+    import fcntl
+    _ensure_dir()
+    fh = open(lock_path(channel), "a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
+def tracked() -> dict[str, dict]:
+    return load_state("tracked")
+
+
+def thread_key(channel: str, thread: str) -> str:
+    # 채널 ID와 ts를 각각 보존해 1.23 / 12.3 같은 충돌을 피한다.
+    if not channel.startswith(("C", "G")) or not channel.isalnum():
+        raise ValueError("채널 ID는 C 또는 G로 시작해야 합니다")
+    if not thread or any(c not in "0123456789." for c in thread) or thread.count(".") != 1:
+        raise ValueError("스레드 ts는 숫자.숫자 형식이어야 합니다")
+    float(thread)
+    return f"thread-{channel}-{thread.replace('.', '_')}"
+
+
+def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) -> dict:
+    import fcntl
+    key = thread_key(channel, thread)
+    _ensure_dir()
+    with open(CHANNELS_DIR / "tracked-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = tracked()
+        if on:
+            data[key] = {"channel": channel, "thread_ts": thread, "any_reply": any_reply}
+            # 등록과 첫 조회 사이의 글도 놓치지 않도록 등록 시점에 커서를 만든다.
+            if not load_state(key):
+                save_state(key, {"cursor": f"{time.time():.6f}"})
+        else:
+            data.pop(key, None)
+        save_state("tracked", data)
+        return data
+
+
+def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners, any_reply=False):
+    """명시 추적은 나이 제한 없이 읽되, any-reply도 발신자 권한을 유지한다."""
+    cursor = str(state["cursor"])
+    out = []
+    allowed = set(owners) | set(listeners)
+    for message in sorted(replies, key=lambda m: float(m.get("ts", 0))):
+        ts = str(message.get("ts") or "0")
+        if float(ts) <= float(cursor):
+            continue
+        cursor = ts
+        if ts == thread or message.get("user") not in allowed:
+            continue
+        if chat.is_for_me(message, bot_user_id, owners, require_mention=not any_reply,
+                          listeners=listeners, context=replies):
+            record = mention_record(channel, message, bot_user_id, thread)
+            record["files"] = message.get("files") or []
+            out.append(record)
+    return out, {"cursor": cursor}
