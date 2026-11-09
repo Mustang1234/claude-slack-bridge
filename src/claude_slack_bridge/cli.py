@@ -1313,7 +1313,10 @@ def _discover_once(conf, known, register=False, initialized=None):
     for c in current:
         if c["id"] not in known:
             if register:
-                channels.save_state(c["id"], {"cursor": f"{time.time():.6f}", "threads": {}})
+                # 보통 봇을 먼저 부르고 나서 초대한다. 발견은 주기적이라 발견 시각을 커서로
+                # 잡으면 초대와 함께 온 첫 멘션이 커서 앞에 떨어져 영영 전달되지 않는다.
+                # FIRST_BACKFILL 만큼 거슬러 보되, 재초대 시 중복은 전달 원장이 거른다.
+                channels.save_state(c["id"], {"cursor": f"{time.time() - channels.FIRST_BACKFILL:.6f}", "threads": {}})
                 channels.set_watched(c["id"], True, c["name"])
             _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
                         "private": c["private"], "new": bool(known) if initialized is None else initialized})

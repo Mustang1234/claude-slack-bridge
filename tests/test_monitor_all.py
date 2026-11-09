@@ -475,12 +475,24 @@ class MonitorTests(unittest.TestCase):
             cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
         self.assertEqual([call.args[0]["ts"] for call in self.emit.call_args_list], ["201"])
 
-    def test_rejoining_channel_starts_at_now(self):
+    def test_rejoining_channel_backfills_only_first_window(self):
+        # 옛 커서(10)는 버리고, 초대 직전 멘션을 살리도록 FIRST_BACKFILL 만큼만 거슬러 본다.
         channels.save_state("C1", {"cursor": "10", "threads": {"1.0": "10"}})
-        with patch.object(cli.time, "time", return_value=200), \
+        now = 10_000.0
+        with patch.object(cli.time, "time", return_value=now), \
              patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]):
             cli._discover_once(self.conf, set(), register=True, initialized=True)
-        self.assertEqual(channels.load_state("C1"), {"cursor": "200.000000", "threads": {}})
+        expected = f"{now - channels.FIRST_BACKFILL:.6f}"
+        self.assertEqual(channels.load_state("C1"), {"cursor": expected, "threads": {}})
+
+    def test_mention_just_before_invite_is_delivered(self):
+        # 봇을 먼저 부르고(9_950) 초대한 뒤 발견 주기(10_000)에 합류해도 그 멘션이 나온다.
+        now = 10_000.0
+        with patch.object(cli.time, "time", return_value=now), \
+             patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]):
+            cli._discover_once(self.conf, set(), register=True, initialized=True)
+        cursor = float(channels.load_state("C1")["cursor"])
+        self.assertLess(cursor, 9_950.0)
 
     def test_first_listener_bot_reply_is_received(self):
         found, state = channels.thread_poll("C1", "1.0", {"cursor": "100"},
