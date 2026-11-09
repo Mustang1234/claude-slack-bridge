@@ -1295,7 +1295,8 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
     known = set(discovery.get("ids", channels.watched()))
     initialized = bool(discovery)
     next_discovery = 0.0
-    errors = (slack.SlackError, OSError, ValueError, TypeError, KeyError)
+    # 한 대상의 어떤 오류도 나머지 감시를 멈추지 않는다. KeyboardInterrupt 는 Exception 이 아니라 빠져나간다.
+    errors = (Exception,)
 
     def report(target, exc):
         print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
