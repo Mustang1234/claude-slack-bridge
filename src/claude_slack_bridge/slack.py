@@ -326,6 +326,9 @@ def conversations_replies(
     payload: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
     if oldest:
         payload["oldest"] = oldest
+    if limit == 1:
+        # attach의 머리글 조회는 의도적으로 한 건만 요청한다.
+        return api(token, "conversations.replies", payload, form=True).get("messages", [])
     return _pages(token, "conversations.replies", payload, "messages")
 
 

@@ -216,13 +216,13 @@ def permission_warning() -> str:
         "  지킴이 기동이 '허가 없는 영속화' 로 분류돼 막힙니다.",
         _red("  모델은 이 권한을 스스로 추가할 수 없습니다 — 설치할 때 사람이 한 번 넣어야 합니다."),
         "",
-        "  settings.json 의 permissions.allow 에 (채널 감시를 쓰면 아래 두 줄까지):",
+        "  settings.json 의 permissions.allow 에 (통합 감시는 --all, 단독 추적은 --thread-poll):",
         "",
         '      "mcp__claude-slack-bridge",',
         '      "Bash(*claude-slack-bridge keeper-start*)",',
         '      "Bash(*claude-slack-bridge monitor --thread *)",',
-        '      "Bash(*claude-slack-bridge monitor --channel *)",',
-        '      "Bash(*claude-slack-bridge monitor --discover*)"',
+        '      "Bash(*claude-slack-bridge monitor --all*)",',
+        '      "Bash(*claude-slack-bridge monitor --thread-poll *)"',
         "",
         "  분류기가 없는 환경(권한을 직접 승인하는 설정)이면 지금은 넘어가도 됩니다.",
         "  막히는 증상은 attach 나 Monitor 등록이 거부되는 것으로 나타납니다.",
@@ -1245,7 +1245,7 @@ def _poll_channel_once(conf, channel, bot_user_id):
     channels.save_state(channel, state)
 
 
-def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False):
+def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_id=""):
     key = channels.thread_key(channel, thread)
     state = channels.load_state(key)
     if not state:
@@ -1256,10 +1256,12 @@ def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False):
         channels.save_state(key, {"cursor": f"{time.time():.6f}"})
         return
     local = threads.load(thread) or {}
+    if local.get("channel") != channel:
+        local = {}
     listeners = list(dict.fromkeys(cfg.channel_listeners(channel) + (local.get("listeners") or [])))
     replies = slack.conversations_replies(conf.bot_token, channel, thread)
     found, next_state = channels.thread_poll(channel, thread, state, replies, bot_user_id,
-                                             conf.owner_ids, listeners, any_reply)
+                                             conf.owner_ids, listeners, any_reply, bot_id=bot_id)
     # 판정에 쓴 원본을 유지한다. bot_id·멘션 유무를 요약 레코드로 추정하지 않는다.
     originals = {str(message.get("ts")): message for message in replies}
     found = [record for record in found if not _channel_command(
@@ -1268,7 +1270,7 @@ def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False):
     channels.save_state(key, next_state)
 
 
-def _discover_once(conf, known, register=False):
+def _discover_once(conf, known, register=False, initialized=None):
     current = slack.my_conversations(conf.bot_token)
     ids = {c["id"] for c in current}
     for c in current:
@@ -1276,7 +1278,7 @@ def _discover_once(conf, known, register=False):
             if register:
                 channels.set_watched(c["id"], True, c["name"])
             _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
-                        "private": c["private"], "new": bool(known)})
+                        "private": c["private"], "new": bool(known) if initialized is None else initialized})
     for gone in known - ids:
         if register:
             channels.set_watched(gone, False)
@@ -1285,17 +1287,23 @@ def _discover_once(conf, known, register=False):
 
 
 def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False):
-    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+    identity = slack.auth_test(conf.bot_token)
+    bot_user_id = str(identity.get("user_id", ""))
+    bot_id = str(identity.get("bot_id") or "")
     if not bot_user_id:
         _die("봇 사용자 ID를 확인하지 못했습니다.")
     locks = {}
-    known = set(channels.watched())
+    discovery = channels.load_state("discovery")
+    known = set(discovery.get("ids", channels.watched()))
+    initialized = bool(discovery)
     next_discovery = 0.0
     try:
         while True:
             if channel is None and time.monotonic() >= next_discovery:
                 try:
-                    known = _discover_once(conf, known, register=True)
+                    known = _discover_once(conf, known, register=True, initialized=initialized)
+                    initialized = True
+                    channels.save_state("discovery", {"ids": sorted(known)})
                     # 현재 멤버십에 없는 stale watched도 첫 회차에 정리한다.
                     next_discovery = time.monotonic() + channels.DISCOVER_POLL
                 except slack.SlackError as exc:
@@ -1316,13 +1324,13 @@ def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False
                     _emit_json({"event": "WATCHING", "channel": target})
                 try:
                     if thread:
-                        _poll_thread_once(conf, target, thread, bot_user_id, any_reply)
+                        _poll_thread_once(conf, target, thread, bot_user_id, any_reply, bot_id=bot_id)
                     else:
                         if target in channels.watched() or channel:
                             _poll_channel_once(conf, target, bot_user_id)
                         for item in tracked:
                             if item["channel"] == target:
-                                _poll_thread_once(conf, target, item["thread_ts"], bot_user_id, item["any_reply"])
+                                _poll_thread_once(conf, target, item["thread_ts"], bot_user_id, item["any_reply"], bot_id=bot_id)
                 except slack.SlackError as exc:
                     if exc.code in ("not_in_channel", "channel_not_found", "is_archived"):
                         channels.set_watched(target, False)
@@ -1394,10 +1402,12 @@ def cmd_discover(argv: list[str]) -> None:
     if conf is None:
         _die("설정이 없습니다.")
     known: set[str] = set()
+    initialized = False
     try:
         while True:
             try:
-                known = _discover_once(conf, known)
+                known = _discover_once(conf, known, initialized=initialized)
+                initialized = True
             except slack.SlackError as exc:
                 print(str(exc), file=sys.stderr, flush=True)
             time.sleep(interval)
@@ -1479,6 +1489,14 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge monitor --thread <ts>
                                  inbox 새 줄을 흘리고 60초마다 지킴이를 점검한다.
                                  open/attach 가 돌려주는 Claude Code Monitor 명령이다
+  claude-slack-bridge monitor --all [--interval N]
+                                 감시 목록과 추적 스레드를 함께 순회하고 채널 합류·이탈도 처리한다
+  claude-slack-bridge monitor --thread-poll <채널> <ts> [--any-reply]
+                                 오래된 스레드를 직접 읽는다. any-reply도 발신자 권한은 확인한다
+  claude-slack-bridge monitor --track <채널> <ts> [--any-reply]
+  claude-slack-bridge monitor --untrack <채널> <ts>
+  claude-slack-bridge monitor --list-tracked
+                                 통합 감시의 명시 추적 목록을 관리한다
   claude-slack-bridge monitor --channel <ID>
                                  채널 최상위와 기존 스레드 안의 @멘션(소유자·채널
                                  listener)을 흘린다. 세션은 그 스레드에 attach 한다

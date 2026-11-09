@@ -2,7 +2,7 @@
 
 스레드 감시는 이미 연 스레드의 답글만 읽는다. 그래서 채널 최상위에서 봇을 처음
 부르거나, 남이 연 스레드 안에서 봇을 처음 부르면 아무도 모른다. 이 모듈이 그 구멍을
-메운다 — 채널마다 `monitor --channel <ID>` 하나가 돌면서 멘션을 찾아 inbox 에 적고
+메운다 — `monitor --all` 하나가 등록된 채널을 돌면서 멘션을 찾아 inbox 에 적고
 세션에 흘린다. 세션은 그 멘션의 스레드에 attach 해서 이후는 기존 지킴이에게 맡긴다.
 
 스레드 안 멘션은 이렇게 찾는다. conversations.history 는 최상위 메시지만 주지만
@@ -225,9 +225,9 @@ def _set_watched(channel: str, on: bool, name: str) -> dict[str, dict]:
 
 
 def monitor_command(channel: str | None) -> list[str]:
-    """채널 Monitor 명령. channel 이 None 이면 --discover."""
+    """채널 Monitor 명령. None이면 통합 --all. 허용 예: Bash(*claude-slack-bridge monitor --all*)."""
     base = threads.keeper_command("0", subcommand="monitor")[:-2]   # "--thread 0" 을 뗀다
-    return base + (["--channel", channel] if channel else ["--discover"])
+    return base + (["--channel", channel] if channel else ["--all"])
 
 
 def window_start(now: float | None = None) -> str:
@@ -282,7 +282,7 @@ def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) ->
         return data
 
 
-def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners, any_reply=False):
+def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners, any_reply=False, bot_id=""):
     """명시 추적은 나이 제한 없이 읽되, any-reply도 발신자 권한을 유지한다."""
     cursor = str(state["cursor"])
     out = []
@@ -292,6 +292,9 @@ def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners,
         if float(ts) <= float(cursor):
             continue
         cursor = ts
+        profile = message.get("bot_profile") or {}
+        if bot_id and (message.get("bot_id") == bot_id or profile.get("id") == bot_id):
+            continue
         if ts == thread or message.get("user") not in allowed:
             continue
         if chat.is_for_me(message, bot_user_id, owners, require_mention=not any_reply,

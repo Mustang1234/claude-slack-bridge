@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from claude_slack_bridge import channels, chat, cli, config as cfg, slack, threads
+from claude_slack_bridge import channels, chat, cli, config as cfg, server, slack, threads
 
 
 def message(ts, user="UOWNER", text="<@UBOT> hello", **extra):
@@ -81,7 +81,7 @@ class MonitorTests(unittest.TestCase):
              patch.object(cli, "_poll_thread_once") as poll, \
              patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
             cli.cmd_monitor(["--all"])
-        poll.assert_called_once_with(self.conf, "C1", "1.0", "UBOT", True)
+        poll.assert_called_once_with(self.conf, "C1", "1.0", "UBOT", True, bot_id="")
         cli.cmd_monitor(["--untrack", "C1", "1.0"])
         self.assertEqual(channels.tracked(), {})
 
@@ -195,6 +195,36 @@ class MonitorTests(unittest.TestCase):
             cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
         self.assertEqual(self.emit.call_args.args[0]["ts"], "101")
 
+    def test_all_emits_channel_records_for_multiple_channels(self):
+        conversations = [{"id": c, "name": c, "private": False} for c in ("C1", "C2")]
+        def sleep(seconds):
+            if seconds == 10:
+                raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=conversations), \
+             patch.object(slack, "conversations_history", return_value=[message(1001)]), \
+             patch.object(cli.time, "time", return_value=1000), \
+             patch.object(cli.time, "sleep", side_effect=sleep):
+            cli.cmd_monitor(["--all"])
+        records = [c.args[0] for c in self.emit.call_args_list if c.args[0].get("source") == "channel"]
+        self.assertEqual([r["channel"] for r in records], ["C1", "C2"])
+        self.assertTrue(all(r["ts"] == "1001" and r["thread_ts"] == "1001" for r in records))
+
+    def test_unwatched_channel_stays_unwatched_after_restart(self):
+        channels.save_state("discovery", {"ids": ["C1"]})
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once") as poll, \
+             patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+            cli.cmd_monitor(["--all"])
+        poll.assert_not_called()
+        self.assertEqual(channels.watched(), {})
+
+    def test_mcp_list_returns_one_all_command(self):
+        channels.set_watched("C1", True)
+        channels.set_watched("C2", True)
+        text = server.slack_channel_list()
+        self.assertEqual(text.count("--all"), 1)
+        self.assertNotIn("--channel", text)
+
     def test_reply_command_uses_parent_and_held_is_skipped(self):
         channels.save_state("C1", {"cursor": "100", "threads": {"1.0": "100"}})
         with patch.object(slack, "conversations_history", return_value=[message(1.0,latest_reply="101")]), \
@@ -203,3 +233,18 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.post.call_args.kwargs["thread_ts"], "1.0")
         self.emit.assert_not_called()
         self.assertEqual(cfg.channel_listeners("C1"), ["UA"])
+
+    def test_thread_poll_rejects_self_by_bot_identity(self):
+        for any_reply in (False, True):
+            for extra in ({"bot_id": "BSELF"}, {"bot_profile": {"id": "BSELF"}}):
+                with self.subTest(any_reply=any_reply, extra=extra):
+                    out, state = channels.thread_poll("C1", "1.0", {"cursor": "1"},
+                        [message(2, "UALIAS", **extra)], "UBOT", ["UOWNER"], ["UALIAS"],
+                        any_reply, bot_id="BSELF")
+                    self.assertEqual(out, [])
+                    self.assertEqual(state["cursor"], "2")
+
+    def test_discovery_after_empty_first_scan_marks_join_as_new(self):
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]):
+            cli._discover_once(self.conf, set(), register=True, initialized=True)
+        self.assertTrue(self.emit.call_args.args[0]["new"])

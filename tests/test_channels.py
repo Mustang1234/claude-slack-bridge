@@ -166,7 +166,7 @@ class WatchedListTests(unittest.TestCase):
     def test_monitor_command_shape(self):
         cmd = channels.monitor_command("C1")
         self.assertEqual(cmd[-3:], ["monitor", "--channel", "C1"])
-        self.assertEqual(channels.monitor_command(None)[-2:], ["monitor", "--discover"])
+        self.assertEqual(channels.monitor_command(None)[-2:], ["monitor", "--all"])
 
 
 class MultiOwnerTests(unittest.TestCase):

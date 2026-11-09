@@ -36,3 +36,15 @@ class RateTests(unittest.TestCase):
             self.assertEqual(len(slack.conversations_replies("t", "C1", "1", limit=500)), 501)
         self.assertEqual(api.call_args.args[2]["cursor"], "next")
         self.assertTrue(api.call_args.kwargs["form"])
+
+    def test_header_lookup_stays_single_page(self):
+        with patch.object(slack, "api", return_value={"messages": [{"ts": "1"}],
+                          "response_metadata": {"next_cursor": "unused"}}) as api:
+            self.assertEqual(slack.conversations_replies("t", "C1", "1", limit=1), [{"ts": "1"}])
+        api.assert_called_once()
+
+    def test_discovery_reads_all_membership_pages(self):
+        with patch.object(slack, "api", side_effect=[
+            {"channels": [{"id": "C1", "name": "one"}], "response_metadata": {"next_cursor": "next"}},
+            {"channels": [{"id": "C2", "name": "two"}]}]):
+            self.assertEqual([c["id"] for c in slack.my_conversations("t")], ["C1", "C2"])

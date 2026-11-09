@@ -77,6 +77,10 @@ claude mcp add claude-slack-bridge -s user -- \
 | `targets` | 설정한 기본 목적지와 봇이 들어간 채널 확인 |
 | `keeper-start --thread <ts>` | 지킴이 수동 기동·진단 (보통은 MCP 서버가 자동 기동) |
 | `monitor --thread <ts>` | inbox 새 줄을 흘리고 60초마다 지킴이 점검 (Claude Code Monitor 툴에 넣는 명령) |
+| `monitor --all [--interval N]` | 감시 채널·추적 스레드 순회 및 새 채널 자동 합류/이탈 |
+| `monitor --thread-poll <채널> <ts> [--any-reply]` | 명시 스레드 직접 감시 |
+| `monitor --track/--untrack <채널> <ts>` | 통합 감시의 추적 스레드 등록·해제 (`--track`은 `--any-reply` 지원) |
+| `monitor --list-tracked` | 추적 목록 확인 |
 | `monitor --channel <ID>` | 채널 최상위·남의 스레드 안에서 처음 부르는 @멘션을 흘린다 (채널 감시) |
 | `monitor --discover` | 봇이 들어간 채널을 흘리고 새로 초대·제외된 채널을 알린다 |
 | `watch --thread <ts>` | tmux·Claude 밖에서 쓰는 폴백 감시자 |
@@ -209,23 +213,52 @@ Monitor를 쓸 수 없는 tmux·Claude 밖 환경에서 답글이 오면 종료�
 
 ## 채널 감시 — 스레드 밖에서 불렸을 때
 
-스레드 감시는 이미 연 스레드의 답글만 본다. 그래서 채널 최상위에서 봇을 처음 부르거나,
-남이 연 스레드 안에서 처음 부르면 아무도 몰랐다. `slack_channel_watch` 로 채널을 등록하면
-`monitor --channel <ID>` 가 그 채널을 10초마다 읽어 그런 멘션을 흘린다.
+채널 감시는 Claude Code Monitor에 `claude-slack-bridge monitor --all --interval 30`
+하나만 띄운다. `watched.json`의 모든 채널을 순회하고, 순회 사이에 최소 60초 간격으로 봇의 채널 목록을 확인해
+새로 초대된 채널을 자동 등록한다. 빠진 채널은 `CHANNEL_GONE`을 출력하고 감시에서 내린다.
+--all을 처음 쓰면 현재 가입한 채널도 합류한다. `--discover`는 독립 조회용으로 남아 있다.
 
-- 소유자와 `채널 듣기` 로 끼운 사람의 @멘션만 온다. 필터는 스레드 지킴이와 같다.
-- 스레드 안 멘션은 최근 7일 안에 올라온 스레드만 본다. 부모의 `latest_reply` 가 바뀐
-  스레드만 열어 보므로 API 호출이 대화량에 비례하지 않는다.
-- 브리지가 이미 쥔 스레드는 건너뛴다. 그 답글은 그 스레드의 지킴이가 받는다.
-- 커서가 파일(`~/.claude-slack-bridge/channels/`)에 남아, Monitor 가 끊겼다 다시 떠도
-  그 사이 온 멘션을 이어서 흘린다. 감시 목록(`watched.json`)도 남아 재시작 뒤 그대로 복구한다.
-- 세션은 멘션의 `thread_ts` 에 `slack_chat_attach(origin=<멘션 ts>)` 로 붙는다. 이 origin 은
-  listener 의 멘션이어도 **그 멘션 자신의 스레드에 붙을 때만** 통과한다. 다른 스레드로
-  붙거나 옮기는 근거는 되지 않는다(경로 탈취 방지). 닫힌 스레드 안에서 다시 불려도 이 경로로
-  다시 열고, 지킴이 커서를 그 멘션까지 밀어 같은 말을 두 번 흘리지 않는다.
+- 이벤트는 기존 --channel과 같은 JSON이며 `channel`, `ts`, `thread_ts`, `user`, `text`를 담는다.
+- 채널에는 owner·채널 listener의 멘션만 전달한다. `@봇 채널 듣기 @사람`과
+  `@봇 채널 그만 @사람`은 소유자만 실행할 수 있고 명령 자체는 inbox로 전달하지 않는다.
+- 일반 채널 감시는 최근 7일 내 부모의 답글을 확인한다. 최초 채널 감시는 30분 백필한다.
+- 열린 스레드는 지킴이 몫이다. 기존 `monitor --thread <ts>`는 계속 유지한다.
+- 같은 채널의 --all/--channel/--thread-poll은 하나만 잠금을 잡는다. 기존 개별 Monitor를
+  종료한 뒤 --all을 띄운다. 중복 실행은 `ALREADY_WATCHING`으로 알리고 건너뛴다.
+- API 호출은 토큰별 파일 잠금으로 프로세스 간 공유하며 최소 1초 간격을 둔다. HTTP 429의
+  Retry-After 동안 해당 토큰의 모든 호출을 기다리고 최대 3회 시도한다. 각 채널 사이에도
+  1초를 둔다. --interval은 한 순회가 끝난 뒤 대기 시간이므로 실제 주기는 채널 수에 따라 늘어난다.
 
-권한 분류기를 쓰면 `Bash(*claude-slack-bridge monitor --channel *)` 와
-`Bash(*claude-slack-bridge monitor --discover*)` 도 허용 목록에 넣는다.
+오래된 스레드나 멘션 없는 후속 답글은 명시적으로 추적한다:
+
+```bash
+claude-slack-bridge monitor --track <채널> <ts> --any-reply
+claude-slack-bridge monitor --list-tracked
+claude-slack-bridge monitor --untrack <채널> <ts>
+# 목록 등록 없이 단독 감시할 때 (--all과 같은 채널을 동시에 감시하지 않는다)
+claude-slack-bridge monitor --thread-poll <채널> <ts> --any-reply --interval 30
+```
+
+추적 목록은 `channels/tracked.json`, 커서는 같은 디렉터리의 스레드별 파일에 남는다.
+첫 등록/단독 기동은 **현재 시점부터, 백필 없음**이다. 이후 재기동은 저장된 커서에서 이어간다.
+해제해도 커서는 보존하므로 재등록하면 마지막 확인 이후를 읽는다. replies는 cursor 페이지를
+끝까지 순회해 500개를 넘는 스레드도 처리한다. --any-reply는 멘션만 면제하며 owner·스레드/채널
+listener 권한과 자기 봇 제외는 유지한다. 첨부 정보는 files 배열에 담는다.
+
+등록한 추적 스레드는 --all/--channel 순회에서 별도로 읽어 중복 조회를 피한다. 채널 경로와
+추적 경로에서 같은 메시지를 읽어도 전달 기록으로 중복을 거른다. inbox 기록·stdout 출력·커서
+저장은 단일 트랜잭션이 아니므로 프로세스가 그 사이 죽으면 재전달될 수 있다. 소비자는
+`channel + ts`로 중복을 거른다. 출력 뒤 세션이 소비하기 전에 죽은 경우는 inbox에서 확인한다.
+전달 기록 파일은 중복 방지를 위해 자동으로 지우지 않는다. 레이트 제한·감시 잠금은 Unix flock이 필요하다.
+
+Monitor가 만료되면 --all 하나를 다시 띄운다. 이 기능은 Claude Code 자체의 만료 시간을 바꾸지 않는다.
+허용 목록 예시는 `Bash(*claude-slack-bridge monitor --all*)`이며 기존 스레드용
+`Bash(*claude-slack-bridge monitor --thread *)`도 유지한다. 단독 추적을 쓰면
+`Bash(*claude-slack-bridge monitor --thread-poll *)`를 추가한다. --track/--untrack은 추적 범위를
+바꾸는 명령이므로 수신 루프 허용과 별도로 취급한다.
+
+멘션의 `thread_ts`에 `slack_chat_attach(origin=<멘션 ts>)`로 붙으면 이후 지킴이가 맡는다.
+listener의 발화는 그 스레드에 붙는 근거일 뿐 다른 스레드로 옮기는 권한은 주지 않는다.
 
 ## 채널에서 쓸 때
 
