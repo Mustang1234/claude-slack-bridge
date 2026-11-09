@@ -2,7 +2,7 @@
 
 스레드 감시는 이미 연 스레드의 답글만 읽는다. 그래서 채널 최상위에서 봇을 처음
 부르거나, 남이 연 스레드 안에서 봇을 처음 부르면 아무도 모른다. 이 모듈이 그 구멍을
-메운다 — 채널마다 `monitor --channel <ID>` 하나가 돌면서 멘션을 찾아 inbox 에 적고
+메운다 — `monitor --all` 하나가 등록된 채널을 돌면서 멘션을 찾아 inbox 에 적고
 세션에 흘린다. 세션은 그 멘션의 스레드에 attach 해서 이후는 기존 지킴이에게 맡긴다.
 
 스레드 안 멘션은 이렇게 찾는다. conversations.history 는 최상위 메시지만 주지만
@@ -36,7 +36,7 @@ FIRST_BACKFILL = 30 * 60    # 처음 띄울 때 거슬러 보는 시간
 
 
 def _safe(channel: str) -> str:
-    return "".join(ch for ch in channel if ch.isalnum())
+    return "".join(ch for ch in channel if ch.isalnum() or ch in "-_")
 
 
 def state_path(channel: str) -> Path:
@@ -110,6 +110,7 @@ def poll(
     listeners: list[str],
     held: set[str],
     now: float,
+    handle_message=None,
 ) -> tuple[list[dict], dict]:
     """한 번의 폴링 판정. Slack 호출은 밖에서 넣어 시험할 수 있게 한다.
 
@@ -132,7 +133,11 @@ def poll(
             continue
         if float(ts) > float(cursor):
             cursor = ts
-            if for_me(m):
+            if ts in held:
+                continue
+            if handle_message and handle_message(m, ts):
+                pass
+            elif for_me(m):
                 out.append(mention_record(channel, m, bot_user_id, None))
 
         latest = m.get("latest_reply")
@@ -153,6 +158,8 @@ def poll(
         for r in replies:
             rts = str(r.get("ts", ""))
             if rts == ts or (last and float(rts) <= float(last)):
+                continue
+            if handle_message and handle_message(r, ts):
                 continue
             if chat.is_for_me(r, bot_user_id, owner_id, require_mention=True,
                               listeners=listeners, context=replies):
@@ -196,6 +203,14 @@ def watched() -> dict[str, dict]:
 
 
 def set_watched(channel: str, on: bool, name: str = "") -> dict[str, dict]:
+    import fcntl
+    _ensure_dir()
+    with open(CHANNELS_DIR / "watched-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _set_watched(channel, on, name)
+
+
+def _set_watched(channel: str, on: bool, name: str) -> dict[str, dict]:
     _ensure_dir()
     data = watched()
     if on:
@@ -210,10 +225,123 @@ def set_watched(channel: str, on: bool, name: str = "") -> dict[str, dict]:
 
 
 def monitor_command(channel: str | None) -> list[str]:
-    """채널 Monitor 명령. channel 이 None 이면 --discover."""
+    """채널 Monitor 명령. None이면 통합 --all. 허용 예: Bash(*claude-slack-bridge monitor --all*)."""
     base = threads.keeper_command("0", subcommand="monitor")[:-2]   # "--thread 0" 을 뗀다
-    return base + (["--channel", channel] if channel else ["--discover"])
+    return base + (["--channel", channel] if channel else ["--all"])
 
 
 def window_start(now: float | None = None) -> str:
     return f"{(now or time.time()) - THREAD_WINDOW:.6f}"
+
+
+TRACKED_NAME = "tracked.json"
+
+
+def acquire_lock(channel: str):
+    """채널별 단일 scanner. --all/--channel/--thread-poll 모두 같은 잠금."""
+    import fcntl
+    _ensure_dir()
+    fh = open(lock_path(channel), "a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
+def tracked() -> dict[str, dict]:
+    return load_state("tracked")
+
+
+def thread_key(channel: str, thread: str) -> str:
+    # 채널 ID와 ts를 각각 보존해 1.23 / 12.3 같은 충돌을 피한다.
+    if not channel.startswith(("C", "G")) or not channel.isalnum():
+        raise ValueError("채널 ID는 C 또는 G로 시작해야 합니다")
+    if not thread or any(c not in "0123456789." for c in thread) or thread.count(".") != 1:
+        raise ValueError("스레드 ts는 숫자.숫자 형식이어야 합니다")
+    float(thread)
+    return f"thread-{channel}-{thread.replace('.', '_')}"
+
+
+def set_tracked(channel: str, thread: str, on: bool, any_reply: bool = False) -> dict:
+    import fcntl
+    key = thread_key(channel, thread)
+    _ensure_dir()
+    with open(CHANNELS_DIR / "tracked-list.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = tracked()
+        if on:
+            data[key] = {"channel": channel, "thread_ts": thread, "any_reply": any_reply}
+            # 등록과 첫 조회 사이의 글도 놓치지 않도록 등록 시점에 커서를 만든다.
+            if not load_state(key):
+                save_state(key, {"cursor": f"{time.time():.6f}"})
+        else:
+            data.pop(key, None)
+        save_state("tracked", data)
+        return data
+
+
+def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners, any_reply=False, bot_id=""):
+    """명시 추적은 나이 제한 없이 읽되, any-reply도 발신자 권한을 유지한다."""
+    cursor = str(state["cursor"])
+    out = []
+    allowed = set(owners) | set(listeners)
+    for message in sorted(replies, key=lambda m: float(m.get("ts", 0))):
+        ts = str(message.get("ts") or "0")
+        if float(ts) <= float(cursor):
+            continue
+        cursor = ts
+        profile = message.get("bot_profile") or {}
+        if bot_id and (message.get("bot_id") == bot_id or profile.get("id") == bot_id):
+            continue
+        if ts == thread or message.get("user") not in allowed:
+            continue
+        # 증분 조회 이전의 연속 봇 수를 이어 붙인다. 처음에는 안전하게 제한값으로 시작한다.
+        prefix = [{"ts": str(-i - 1), "bot_id": "prior"}
+                  for i in range(int(state.get("bot_streak", chat.BOT_TURN_LIMIT)))]
+        context = prefix + [m for m in replies if float(m.get("ts", 0)) > float(state["cursor"])
+                            and str(m.get("ts")) != thread]
+        if chat.is_for_me(message, bot_user_id, owners, require_mention=not any_reply,
+                          listeners=listeners, context=context):
+            record = mention_record(channel, message, bot_user_id, thread)
+            record["files"] = message.get("files") or []
+            out.append(record)
+    streak = int(state.get("bot_streak", chat.BOT_TURN_LIMIT))
+    for message in sorted(replies, key=lambda m: float(m.get("ts", 0))):
+        if float(message.get("ts", 0)) > float(state["cursor"]) and str(message.get("ts")) != thread:
+            streak = min(chat.BOT_TURN_LIMIT, streak + 1) if message.get("bot_id") else 0
+    return out, {"cursor": cursor, "bot_streak": streak}
+
+
+def deliver_once(channel, thread, message_ts, write):
+    """지킴이/감시자의 durable inbox를 전달 근거로 삼아 인계 중복을 막는다."""
+    import fcntl
+    _ensure_dir()
+    key = f"delivered-{channel}"
+    with open(lock_path(key), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        delivered = load_state(key)
+        ts = str(message_ts)
+        if ts in delivered:
+            return False
+        # 구버전 지킴이 기록 및 inbox append 후 ledger 저장 전 종료도 복구한다.
+        already = any(str(m.get("ts")) == ts for m in threads.read_inbox(thread, 0))
+        if not already:
+            try:
+                with open(inbox_path(channel), encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            record = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(record, dict) and str(record.get("ts")) == ts:
+                            already = True
+                            break
+            except FileNotFoundError:
+                pass
+        if not already:
+            write()
+        delivered[ts] = True
+        save_state(key, delivered)
+        return not already

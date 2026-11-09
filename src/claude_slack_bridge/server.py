@@ -210,10 +210,14 @@ DM 으로 나간다.
 
 스레드 감시는 이미 연 스레드의 답글만 본다. 채널 최상위에서 처음 부르거나, 남이 연 스레드
 안에서 처음 부르는 멘션은 **채널 감시**가 잡는다. `slack_channel_watch(channel, origin)` 로
-등록하면 목록(`~/.claude-slack-bridge/channels/watched.json`)에 남고, 반환문의 명령을 채널마다
-Monitor 하나로 띄운다. 등록은 소유자만 할 수 있다(origin 규칙은 attach 와 같다).
-**세션이 재시작되면 `slack_channel_list` 로 목록을 보고 채널마다 Monitor 를 다시 띄운다.**
-목록은 남아 있으므로 다시 등록할 필요는 없다.
+등록하면 목록(`~/.claude-slack-bridge/channels/watched.json`)에 남는다. 등록은 소유자만
+할 수 있다(origin 규칙은 attach 와 같다). **채널 감시는 `monitor --all` 하나만 Monitor로
+띄운다.** watched 채널과 명시 추적 스레드를 함께 순회하고, 새로 초대된 채널은 자동 등록한다.
+기존 --channel 감시는 먼저 내려 잠금을 넘긴다. 세션 재시작·Monitor 만료 시 --all 하나를
+다시 띄운다. 열린 스레드의 기존 inbox Monitor(--thread)는 별도로 유지한다.
+
+무거운 조사(레포 탐색 등)는 백그라운드 서브 에이전트에 위임하고 메인 세션은 Slack 응답과
+감시 유지에 집중한다. 현업 원 스레드에는 짧게 답하고, 상세한 상의는 작업 스레드에서 한다.
 
 채널 Monitor 가 흘리는 줄:
 
@@ -223,11 +227,13 @@ Monitor 하나로 띄운다. 등록은 소유자만 할 수 있다(origin 규칙
   이 origin 은 **그 멘션의 스레드에 붙을 때만** 통과한다 — listener 의 멘션으로 다른
   스레드에 붙거나 옮길 수는 없다. 그 스레드가 이미 닫혔어도 다시 연다(🔓) — 끝난 스레드라도
   그 안에서 다시 불렸으면 거기서 답한다.
-- `{"event": "CHANNEL_GONE"}` — 봇이 채널에서 빠졌다. Monitor 를 내리고 `slack_channel_unwatch`.
+- `{"event": "CHANNEL_GONE"}` — 해당 채널만 자동으로 감시에서 내린다. 통합 Monitor는 유지한다.
 
 이미 쥔 스레드 안의 멘션은 채널 감시가 흘리지 않는다 — 그 스레드의 지킴이가 받는다.
-`monitor --discover` 는 봇이 들어간 채널을 흘리고, 새로 초대되면 `"new": true` 로 알린다.
-어느 채널을 감시할지는 세션(소유자의 지시)이 정한다.
+--all이 새 채널을 자동 합류시키며 `CHANNEL` 이벤트를 흘린다. 독립 --discover도 남아 있다.
+7일보다 오래된 스레드나 멘션 없는 후속 답글은 `monitor --track <채널> <ts> [--any-reply]`로
+등록한다. --all이 함께 읽으며, --any-reply도 owner/listener 권한과 자기 봇 제외를 유지한다.
+해제는 --untrack, 목록 확인은 --list-tracked다. 첫 등록은 현재 시점부터이며 백필하지 않는다.
 
 ## 옮길 때는 `slack_chat_switch`
 
@@ -256,7 +262,7 @@ Slack URL을 목적지로 받으면 채널 URL은 그 채널에 새 스레드를
 
 server = MCPServer(
     name="claude-slack-bridge",
-    version="1.5.1",
+    version="1.6.0",
     instructions=INSTRUCTIONS,
 )
 
@@ -1149,8 +1155,8 @@ def slack_chat_attach(
 
 def _channel_monitor_lines(channel: str) -> str:
     return (
-        "Claude Code Monitor 툴(persistent)에 아래 명령을 그대로 넣는다:\n"
-        f"{shlex.join(channels.monitor_command(channel))}\n"
+        "통합 Monitor가 없을 때만 Claude Code Monitor 툴(persistent)에 아래 명령을 넣는다:\n"
+        f"{shlex.join(channels.monitor_command(None))}\n"
         "멘션 줄이 오면 그 thread_ts 에 slack_chat_attach(origin=<멘션 ts>) 로 붙어 답한다. "
         "Monitor 는 30분이면 만료된다 — 만료 알림을 보는 즉시 같은 명령으로 다시 띄운다. "
         "끊긴 사이 온 멘션은 커서가 기억해 다시 띄우면 이어서 흘린다."
@@ -1191,7 +1197,7 @@ def slack_channel_watch(channel: str, origin: str = "") -> str:
 @server.tool(
     name="slack_channel_unwatch",
     title="채널 감시 해제",
-    description="채널을 감시 목록에서 뺀다. 그 채널의 Monitor 는 세션이 TaskStop 으로 내린다.",
+    description="채널을 감시 목록에서 뺀다. 통합 Monitor는 유지하고 다음 순회부터 제외한다.",
 )
 def slack_channel_unwatch(channel: str, origin: str = "") -> str:
     conf = cfg.load()
@@ -1204,21 +1210,22 @@ def slack_channel_unwatch(channel: str, origin: str = "") -> str:
     if target not in channels.watched():
         return f"감시 목록에 없습니다: {target}"
     channels.set_watched(target, False)
-    return f"감시 목록에서 뺐습니다({target}). 그 채널의 Monitor 를 TaskStop 으로 내려주세요."
+    return f"감시 목록에서 뺐습니다({target}). 통합 Monitor는 유지합니다. 명시 추적 스레드는 --untrack으로 따로 해제하세요."
 
 
 @server.tool(
     name="slack_channel_list",
     title="채널 감시 목록",
-    description="감시 중인 채널과 각 채널의 Monitor 명령을 보여준다. 세션이 재시작되면 이것으로 감시를 다시 띄운다.",
+    description="감시 채널 목록과 통합 Monitor 명령 하나를 보여준다.",
 )
 def slack_channel_list() -> str:
     rows = channels.watched()
     if not rows:
         return "감시 중인 채널이 없습니다."
-    out = ["감시 중인 채널 — 채널마다 아래 명령으로 Monitor 하나씩:"]
+    out = ["감시 중인 채널:"]
     for ch, meta in rows.items():
-        out.append(f"{ch}  #{meta.get('name', '')}\n  {shlex.join(channels.monitor_command(ch))}")
+        out.append(f"{ch}  #{meta.get('name', '')}")
+    out.append(_channel_monitor_lines(""))
     return "\n".join(out)
 
 

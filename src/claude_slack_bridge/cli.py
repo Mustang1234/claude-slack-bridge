@@ -216,13 +216,13 @@ def permission_warning() -> str:
         "  지킴이 기동이 '허가 없는 영속화' 로 분류돼 막힙니다.",
         _red("  모델은 이 권한을 스스로 추가할 수 없습니다 — 설치할 때 사람이 한 번 넣어야 합니다."),
         "",
-        "  settings.json 의 permissions.allow 에 (채널 감시를 쓰면 아래 두 줄까지):",
+        "  settings.json 의 permissions.allow 에 (통합 감시는 --all, 단독 추적은 --thread-poll):",
         "",
         '      "mcp__claude-slack-bridge",',
         '      "Bash(*claude-slack-bridge keeper-start*)",',
         '      "Bash(*claude-slack-bridge monitor --thread *)",',
-        '      "Bash(*claude-slack-bridge monitor --channel *)",',
-        '      "Bash(*claude-slack-bridge monitor --discover*)"',
+        '      "Bash(*claude-slack-bridge monitor --all*)",',
+        '      "Bash(*claude-slack-bridge monitor --thread-poll *)"',
         "",
         "  분류기가 없는 환경(권한을 직접 승인하는 설정)이면 지금은 넘어가도 됩니다.",
         "  막히는 증상은 attach 나 Monitor 등록이 거부되는 것으로 나타납니다.",
@@ -782,11 +782,15 @@ def cmd_keeper(argv: list[str]) -> None:
                     continue
 
                 summary = chat.describe(m).replace("\n", " ")[:120]
-                threads.append_inbox(thread, m, summary)
+                delivered = channels.deliver_once(channel, thread, m["ts"],
+                    lambda: threads.append_inbox(thread, m, summary))
                 # append와 fsync가 끝난 뒤에만 Slack 커서를 민다. 이 순서가 뒤집히면
                 # 둘 사이의 크래시가 메시지를 영구히 건너뛰게 한다.
                 seen = message_ts
                 threads.patch(thread, keeper_seen_ts=seen)
+
+                if not delivered:
+                    continue
 
                 # 예고를 본 뒤 온 일반 답글은 자리에 있다는 신호다. inbox 기록과
                 # 커서 전진을 먼저 끝내야 연장 도중 죽어도 메시지 자체는 남는다.
@@ -1111,6 +1115,9 @@ def cmd_monitor(argv: list[str]) -> None:
     죽을 때 고아 tail 이 inbox 를 계속 열어 두고, 수신자 판정(inbox_tailed)이 죽은
     세션을 듣는 중으로 오판한다. 파일을 열어 두는 주체가 이 프로세스 하나여야 한다.
     """
+    if any(option in argv for option in ("--all", "--thread-poll", "--track", "--untrack", "--list-tracked")):
+        cmd_combined_monitor(argv)
+        return
     if _arg(argv, "--channel"):
         cmd_channel_monitor(argv)
         return
@@ -1184,85 +1191,231 @@ def _emit_json(record: dict) -> None:
     sys.stdout.buffer.flush()
 
 
-def cmd_channel_monitor(argv: list[str]) -> None:
-    """채널 하나의 멘션을 흘리는 Monitor 루프.
+def _publish_records(conf, channel, records):
+    for record in records:
+        def write():
+            channels.append_inbox(channel, record)
+            _emit_json(record)
+        if not channels.deliver_once(channel, record["thread_ts"], record["ts"], write):
+            continue
+        slack.set_session_status(
+            conf.bot_token, channel, record["thread_ts"], "processing",
+            initiator_user_id=str(record.get("user") or conf.owner_id),
+            title=str(record.get("text") or "")[:60],
+        )
 
-    스레드 monitor 와 달리 지킴이가 따로 없다. 채널에는 지킬 마감도, 답할 지킴이
-    명령도 없고, 멘션을 찾은 뒤의 일(작업 중 표시·30초 대체 답글·⚠️)은 세션이 그
-    스레드에 attach 하는 순간 기존 지킴이가 맡는다. 그래서 이 프로세스가 Slack 을
-    직접 읽고, 찾은 멘션을 inbox 에 먼저 적은 뒤(attach 의 origin 판정 근거) 흘린다.
 
-    같은 채널에 둘이 뜨면 같은 멘션을 두 번 흘리고 커서를 서로 민다. 잠금으로 막는다.
-    """
-    channel = _arg(argv, "--channel") or ""
-    interval = float(_arg(argv, "--interval") or channels.POLL)
-    conf = cfg.load()
-    if conf is None:
-        _die("설정이 없습니다.")
-    if channel.startswith("D"):
-        _die("DM 은 채널 감시 대상이 아닙니다. DM 은 스레드로 받습니다.")
-    if not conf.owner_id:
-        _die("owner 가 없어 채널 지시를 받지 않습니다. init 을 다시 실행하세요.")
+def _channel_command(conf, channel, bot_user_id, message, parent, listeners):
+    text = message.get("text") or ""
+    if f"<@{bot_user_id}>" not in text or not chat.is_human(message, bot_user_id, listeners):
+        return False
+    command = chat.parse_command(chat.strip_mention(text, bot_user_id))
+    if not command or command[0] not in ("listen", "unlisten") or command[2] != "channel":
+        return False
+    # 명령 결과는 일반 inbox로 전달하지 않는다. 기존 문구·owner 게이트를 재사용한다.
+    key = f"commands-{channel}"
+    done = channels.load_state(key)
+    ts = str(message.get("ts") or "")
+    if ts not in done:
+        _apply_command(conf.bot_token, channel, parent, "", command[0], command[1],
+                       threads.load(parent) or {}, str(message.get("user") or ""),
+                       conf.owner_ids, scope="channel")
+        done[ts] = True
+        channels.save_state(key, done)
+    listeners[:] = cfg.channel_listeners(channel)
+    return True
 
-    channels._ensure_dir()
-    lock = open(channels.lock_path(channel), "a")
-    try:
-        import fcntl
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        _emit_json({"event": "ALREADY_WATCHING", "channel": channel})
-        return
-    except ImportError:   # pragma: no cover - Windows
-        pass
 
-    bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+def _poll_channel_once(conf, channel, bot_user_id):
     state = channels.load_state(channel)
-    _emit_json({"event": "WATCHING", "channel": channel})
-    unreachable_since = 0.0
+    now = time.time()
+    listeners = cfg.channel_listeners(channel)
+    explicit = {item["thread_ts"] for item in channels.tracked().values()
+                if item["channel"] == channel}
+    found, state = channels.poll(
+        channel, state,
+        slack.conversations_history(conf.bot_token, channel, channels.window_start(now)),
+        lambda parent, oldest: slack.conversations_replies(conf.bot_token, channel, parent),
+        bot_user_id, conf.owner_ids, listeners, channels.held_threads(channel) | explicit, now,
+        handle_message=lambda msg, parent: _channel_command(conf, channel, bot_user_id, msg, parent, listeners),
+    )
+    _publish_records(conf, channel, found)
+    channels.save_state(channel, state)
+
+
+def _poll_thread_once(conf, channel, thread, bot_user_id, any_reply=False, bot_id=""):
+    key = channels.thread_key(channel, thread)
+    state = channels.load_state(key)
+    if not state:
+        state = {"cursor": f"{time.time():.6f}"}
+        channels.save_state(key, state)
+    if thread in channels.held_threads(channel):
+        # 처리 완료 여부는 inbox/전달기록으로 확인한다. 시간만으로 커서를 밀지 않는다.
+        return
+    local = threads.load(thread) or {}
+    if local.get("channel") != channel:
+        local = {}
+    listeners = list(dict.fromkeys(cfg.channel_listeners(channel) + (local.get("listeners") or [])))
+    replies = slack.conversations_replies(conf.bot_token, channel, thread, oldest=state["cursor"])
+    found, next_state = channels.thread_poll(channel, thread, state, replies, bot_user_id,
+                                             conf.owner_ids, listeners, any_reply, bot_id=bot_id)
+    # 판정에 쓴 원본을 유지한다. bot_id·멘션 유무를 요약 레코드로 추정하지 않는다.
+    originals = {str(message.get("ts")): message for message in replies}
+    found = [record for record in found if not _channel_command(
+        conf, channel, bot_user_id, originals[record["ts"]], thread, listeners)]
+    _publish_records(conf, channel, found)
+    channels.save_state(key, next_state)
+
+
+def _discover_once(conf, known, register=False, initialized=None):
+    current = slack.my_conversations(conf.bot_token)
+    ids = {c["id"] for c in current}
+    for c in current:
+        if c["id"] not in known:
+            if register:
+                channels.set_watched(c["id"], True, c["name"])
+            _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
+                        "private": c["private"], "new": bool(known) if initialized is None else initialized})
+    for gone in known - ids:
+        if register:
+            channels.set_watched(gone, False)
+        _emit_json({"event": "CHANNEL_GONE", "channel": gone})
+    return ids
+
+
+def _monitor_scanners(conf, interval, channel=None, thread=None, any_reply=False):
+    identity = slack.auth_test(conf.bot_token)
+    bot_user_id = str(identity.get("user_id", ""))
+    bot_id = str(identity.get("bot_id") or "")
+    if not bot_user_id:
+        _die("봇 사용자 ID를 확인하지 못했습니다.")
+    locks = {}
+    announced = set()
+    discovery = channels.load_state("discovery")
+    known = set(discovery.get("ids", channels.watched()))
+    initialized = bool(discovery)
+    next_discovery = 0.0
+    # 한 대상의 어떤 오류도 나머지 감시를 멈추지 않는다. KeyboardInterrupt 는 Exception 이 아니라 빠져나간다.
+    errors = (Exception,)
+
+    def report(target, exc):
+        print(f"SLACK_UNREACHABLE\t{target}\t{exc}".replace("\n", " "), file=sys.stderr, flush=True)
+
     try:
         while True:
-            try:
-                now = time.time()
-                history = slack.conversations_history(
-                    conf.bot_token, channel, channels.window_start(now)
-                )
-                found, state = channels.poll(
-                    channel, state, history,
-                    lambda parent, oldest: slack.conversations_replies(
-                        conf.bot_token, channel, parent, oldest=oldest
-                    ),
-                    bot_user_id, conf.owner_ids, cfg.channel_listeners(channel),
-                    channels.held_threads(channel), now,
-                )
-                for record in found:
-                    channels.append_inbox(channel, record)
-                    _emit_json(record)
-                    # 세션이 attach 하기 전에도 "작업 중" 을 먼저 켠다. 스레드 지킴이는 붙은
-                    # 뒤에야 뜨므로, 그 사이(세션이 일을 고르는 몇 초~수십 초)가 비어 있었다.
-                    # 세션이 그 스레드에 slack_notify 로 답하면 active 로 내려간다.
-                    slack.set_session_status(
-                        conf.bot_token, channel, record["thread_ts"], "processing",
-                        initiator_user_id=str(record.get("user") or conf.owner_id),
-                        title=str(record.get("text") or "")[:60],
-                    )
-                channels.save_state(channel, state)
-                if unreachable_since:
-                    _log(f"SLACK_BACK\t{_span(time.time() - unreachable_since)} 만에")
-                    unreachable_since = 0.0
-            except slack.SlackError as e:
-                if e.code in ("not_in_channel", "channel_not_found", "is_archived"):
-                    _emit_json({"event": "CHANNEL_GONE", "channel": channel, "error": e.code})
-                    return
-                if not unreachable_since:
-                    unreachable_since = time.time()
-                    print(f"SLACK_UNREACHABLE\t{e}".replace("\n", " "), file=sys.stderr, flush=True)
-                if e.code == "ratelimited":
-                    time.sleep(30)
-            time.sleep(interval)
+            if channel is None and time.monotonic() >= next_discovery:
+                try:
+                    known = _discover_once(conf, known, register=True, initialized=initialized)
+                    initialized = True
+                    channels.save_state("discovery", {"ids": sorted(known)})
+                except errors as exc:
+                    report("discovery", exc)
+                next_discovery = time.monotonic() + channels.DISCOVER_POLL
+            tracked = []
+            for item in channels.tracked().values():
+                try:
+                    channels.thread_key(item["channel"], item["thread_ts"])
+                    tracked.append(item)
+                except errors as exc:
+                    report("tracked", exc)
+            targets = {channel} if channel else set(channels.watched()) | {
+                item["channel"] for item in tracked if item["channel"] in known}
+            jobs = []
+            for target in sorted(targets):
+                if thread:
+                    jobs.append((target, channels.thread_key(target, thread), thread, any_reply))
+                else:
+                    if target in channels.watched() or channel:
+                        jobs.append((target, target, None, False))
+                    for item in tracked:
+                        if item["channel"] == target:
+                            jobs.append((target, channels.thread_key(target, item["thread_ts"]),
+                                         item["thread_ts"], bool(item.get("any_reply"))))
+            desired = {job[1] for job in jobs}
+            announced.intersection_update(desired)
+            for gone in set(locks) - desired:
+                locks.pop(gone).close()
+            for target, key, parent, any_answer in jobs:
+                try:
+                    if key not in locks:
+                        lock = channels.acquire_lock(key)
+                        if lock is None:
+                            if key not in announced:
+                                _emit_json({"event": "ALREADY_WATCHING", "channel": target,
+                                            **({"thread_ts": parent} if parent else {})})
+                                announced.add(key)
+                            if channel and (thread or parent is None):
+                                return
+                            continue
+                        locks[key] = lock
+                        announced.discard(key)
+                        _emit_json({"event": "WATCHING", "channel": target,
+                                    **({"thread_ts": parent} if parent else {})})
+                    if parent:
+                        _poll_thread_once(conf, target, parent, bot_user_id, any_answer, bot_id=bot_id)
+                    else:
+                        _poll_channel_once(conf, target, bot_user_id)
+                except errors as exc:
+                    report(key, exc)
+                    if isinstance(exc, slack.SlackError) and exc.code in ("not_in_channel", "channel_not_found", "is_archived"):
+                        try:
+                            channels.set_watched(target, False)
+                            known.discard(target)
+                            _emit_json({"event": "CHANNEL_GONE", "channel": target, "error": exc.code})
+                        except errors as cleanup_error:
+                            report(key, cleanup_error)
+                        if key in locks:
+                            locks.pop(key).close()
+                        if channel:
+                            return
+                time.sleep(1.0)
+            time.sleep(max(1.0, interval))
     except KeyboardInterrupt:
         return
     finally:
-        lock.close()
+        for lock in locks.values():
+            lock.close()
+
+
+def _monitor_config():
+    conf = cfg.load()
+    if conf is None or not conf.owner_ids:
+        _die("설정과 owner가 필요합니다.")
+    return conf
+
+
+def cmd_channel_monitor(argv: list[str]) -> None:
+    channel = _arg(argv, "--channel") or ""
+    if not channel.startswith(("C", "G")):
+        _die("채널 ID가 필요합니다. DM은 스레드로 받습니다.")
+    _monitor_scanners(_monitor_config(), float(_arg(argv, "--interval") or channels.POLL), channel=channel)
+
+
+def cmd_combined_monitor(argv: list[str]) -> None:
+    options = [o for o in ("--all", "--thread-poll", "--track", "--untrack", "--list-tracked", "--channel", "--discover", "--thread") if o in argv]
+    if len(options) != 1:
+        _die("감시 옵션은 하나만 지정하세요.")
+    option = options[0]
+    if option == "--list-tracked":
+        for item in channels.tracked().values():
+            _emit_json(item)
+        return
+    channel = thread = None
+    if option != "--all":
+        pos = argv.index(option)
+        if len(argv) <= pos + 2:
+            _die(f"{option} <채널> <스레드 ts>가 필요합니다.")
+        channel, thread = argv[pos + 1:pos + 3]
+        try:
+            channels.thread_key(channel, thread)
+        except ValueError as exc:
+            _die(str(exc))
+    if option in ("--track", "--untrack"):
+        channels.set_tracked(channel, thread, option == "--track", "--any-reply" in argv)
+        _emit_json({"event": "TRACKED" if option == "--track" else "UNTRACKED", "channel": channel, "thread_ts": thread})
+        return
+    _monitor_scanners(_monitor_config(), float(_arg(argv, "--interval") or channels.POLL),
+                      channel=channel, thread=thread, any_reply="--any-reply" in argv)
 
 
 def cmd_discover(argv: list[str]) -> None:
@@ -1275,20 +1428,14 @@ def cmd_discover(argv: list[str]) -> None:
     if conf is None:
         _die("설정이 없습니다.")
     known: set[str] = set()
+    initialized = False
     try:
         while True:
             try:
-                current = slack.my_conversations(conf.bot_token)
-                ids = {c["id"] for c in current}
-                for c in current:
-                    if c["id"] not in known:
-                        _emit_json({"event": "CHANNEL", "channel": c["id"], "name": c["name"],
-                                    "private": c["private"], "new": bool(known)})
-                for gone in known - ids:
-                    _emit_json({"event": "CHANNEL_GONE", "channel": gone})
-                known = ids
-            except slack.SlackError as e:
-                print(f"SLACK_UNREACHABLE\t{e}".replace("\n", " "), file=sys.stderr, flush=True)
+                known = _discover_once(conf, known, initialized=initialized)
+                initialized = True
+            except slack.SlackError as exc:
+                print(str(exc), file=sys.stderr, flush=True)
             time.sleep(interval)
     except KeyboardInterrupt:
         return
@@ -1368,6 +1515,14 @@ claude-slack-bridge — Claude Code 세션과 Slack 을 잇는 MCP 서버
   claude-slack-bridge monitor --thread <ts>
                                  inbox 새 줄을 흘리고 60초마다 지킴이를 점검한다.
                                  open/attach 가 돌려주는 Claude Code Monitor 명령이다
+  claude-slack-bridge monitor --all [--interval N]
+                                 감시 목록과 추적 스레드를 함께 순회하고 채널 합류·이탈도 처리한다
+  claude-slack-bridge monitor --thread-poll <채널> <ts> [--any-reply]
+                                 오래된 스레드를 직접 읽는다. any-reply도 발신자 권한은 확인한다
+  claude-slack-bridge monitor --track <채널> <ts> [--any-reply]
+  claude-slack-bridge monitor --untrack <채널> <ts>
+  claude-slack-bridge monitor --list-tracked
+                                 통합 감시의 명시 추적 목록을 관리한다
   claude-slack-bridge monitor --channel <ID>
                                  채널 최상위와 기존 스레드 안의 @멘션(소유자·채널
                                  listener)을 흘린다. 세션은 그 스레드에 attach 한다

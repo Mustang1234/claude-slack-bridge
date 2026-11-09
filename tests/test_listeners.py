@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from claude_slack_bridge import chat, cli, config as cfg, server, slack, threads
+from claude_slack_bridge import channels, chat, cli, config as cfg, server, slack, threads
 
 
 class ParserTests(unittest.TestCase):
@@ -50,6 +50,7 @@ class ListenerTests(unittest.TestCase):
         ):
             self.enterContext(patch.object(cfg, target, value))
         self.enterContext(patch.object(threads, "THREADS_DIR", self.root / "threads"))
+        self.enterContext(patch.object(channels, "CHANNELS_DIR", self.root / "channels"))
         self.enterContext(patch.object(slack, "api", side_effect=AssertionError("Unexpected Slack API call")))
         self.post = self.enterContext(patch.object(slack, "post_message"))
         self.enterContext(patch.object(slack, "chat_update"))
