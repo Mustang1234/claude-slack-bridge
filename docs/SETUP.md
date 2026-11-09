@@ -4,8 +4,10 @@
 안에서 순서대로 안내하고, 각 단계가 실제로 됐는지 검사까지 한다. 아래는 미리
 훑어보고 싶을 때 보는 것이다.
 
+`<태그>` 는 personal(`v<버전>`)·team(`team-v<버전>`) 중 쓰려는 쪽의 최신 태그다 — README 「personal 과 team 중 고르기」 참고.
+
 ```bash
-uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge init
+uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge init
 ```
 
 브라우저에서 하는 일과 터미널에서 하는 일이 나뉜다. 브라우저 쪽이 먼저다.
@@ -83,7 +85,7 @@ chmod 600 ~/.claude-slack-bridge/config.json
 
 ```bash
 claude mcp add claude-slack-bridge -s user -- \
-  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge claude-slack-bridge
+  uvx --from git+https://github.com/Mustang1234/claude-slack-bridge@<태그> claude-slack-bridge
 ```
 
 `-s user` 는 모든 프로젝트에서 쓰겠다는 뜻이다. 알림은 어느 프로젝트에서 일하든
