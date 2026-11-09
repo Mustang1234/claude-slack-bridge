@@ -79,7 +79,7 @@ class MonitorTests(unittest.TestCase):
         with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
              patch.object(cli, "_poll_channel_once"), \
              patch.object(cli, "_poll_thread_once") as poll, \
-             patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+             patch.object(cli.time, "sleep", side_effect=lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()) if seconds == 10 else None):
             cli.cmd_monitor(["--all"])
         poll.assert_called_once_with(self.conf, "C1", "1.0", "UBOT", True, bot_id="")
         cli.cmd_monitor(["--untrack", "C1", "1.0"])
@@ -248,3 +248,197 @@ class MonitorTests(unittest.TestCase):
         with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]):
             cli._discover_once(self.conf, set(), register=True, initialized=True)
         self.assertTrue(self.emit.call_args.args[0]["new"])
+
+
+    def test_standalone_lock_conflict_emits_once_and_exits(self):
+        for args, key in ((["--channel", "C1"], "C1"),
+                          (["--thread-poll", "C1", "1.0"], channels.thread_key("C1", "1.0"))):
+            with self.subTest(args=args):
+                self.emit.reset_mock()
+                lock = channels.acquire_lock(key)
+                try:
+                    with patch.object(cli.time, "sleep", side_effect=AssertionError("Must exit")):
+                        cli.cmd_monitor(args)
+                    self.assertEqual(self.emit.call_count, 1)
+                    self.assertEqual(self.emit.call_args.args[0]["event"], "ALREADY_WATCHING")
+                finally:
+                    lock.close()
+
+    def test_all_reports_conflict_once_then_rejoins(self):
+        lock = channels.acquire_lock("C1")
+        self.addCleanup(lock.close)
+        rounds = []
+        def sleep(seconds):
+            if seconds == 10:
+                rounds.append(1)
+                if len(rounds) == 2:
+                    lock.close()
+                if len(rounds) == 3:
+                    raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once") as poll, \
+             patch.object(cli.time, "sleep", side_effect=sleep):
+            cli.cmd_monitor(["--all"])
+        events = [call.args[0]["event"] for call in self.emit.call_args_list]
+        self.assertEqual(events.count("ALREADY_WATCHING"), 1)
+        poll.assert_called_once()
+
+    def test_thread_and_channel_scanners_use_independent_locks(self):
+        for key, args, method in (
+            ("C1", ["--thread-poll", "C1", "1.0"], "_poll_thread_once"),
+            (channels.thread_key("C1", "1.0"), ["--all"], "_poll_channel_once"),
+        ):
+            with self.subTest(args=args):
+                lock = channels.acquire_lock(key)
+                try:
+                    with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+                         patch.object(cli, method) as poll, \
+                         patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+                        cli.cmd_monitor(args)
+                    poll.assert_called_once()
+                finally:
+                    lock.close()
+
+    def test_all_tracked_uses_same_thread_lock_as_standalone(self):
+        channels.set_tracked("C1", "1.0", True)
+        lock = channels.acquire_lock(channels.thread_key("C1", "1.0"))
+        self.addCleanup(lock.close)
+        def sleep(seconds):
+            if seconds == 10:
+                raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once") as channel_poll, \
+             patch.object(cli, "_poll_thread_once") as thread_poll, \
+             patch.object(cli.time, "sleep", side_effect=sleep):
+            cli.cmd_monitor(["--all"])
+        channel_poll.assert_called_once()
+        thread_poll.assert_not_called()
+
+    def test_thread_fetch_passes_oldest_and_ignores_parent(self):
+        channels.save_state(channels.thread_key("C1", "1.0"), {"cursor": "100"})
+        with patch.object(slack, "conversations_replies", return_value=[message("1.0"), message(101)]) as fetch:
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+        fetch.assert_called_once_with("test-token", "C1", "1.0", oldest="100")
+        self.assertEqual([c.args[0]["ts"] for c in self.emit.call_args_list], ["101"])
+
+    def test_held_cursor_is_not_advanced_without_delivery(self):
+        key = channels.thread_key("C1", "1.0")
+        channels.save_state(key, {"cursor": "100", "bot_streak": 2})
+        with patch.object(channels, "held_threads", return_value={"1.0"}):
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+        self.assertEqual(channels.load_state(key), {"cursor": "100", "bot_streak": 2})
+
+    def _run_test_keeper(self, messages):
+        threads.save("1.0", {"channel": "C1", "deadline": time.time()+3600,
+                             "require_mention": True, "closed": False})
+        with patch.object(cli, "_keep_awake", return_value=None), \
+             patch.object(slack, "conversations_replies", return_value=messages), \
+             patch.object(cli, "_check_session_health"), \
+             patch.object(cli, "_log"), \
+             patch.object(cli.time, "sleep", side_effect=lambda _: threads.patch("1.0", closed=True)):
+            cli.cmd_keeper(["--thread", "1.0"])
+
+    def test_keeper_to_thread_poll_handoff_deduplicates(self):
+        m = message(101)
+        self._run_test_keeper([m])
+        self.assertEqual([m["ts"] for m in threads.read_inbox("1.0", 0)], ["101"])
+        channels.save_state(channels.thread_key("C1", "1.0"), {"cursor": "100"})
+        with patch.object(slack, "conversations_replies", return_value=[m, message(102)]):
+            cli._poll_thread_once(self.conf, "C1", "1.0", "UBOT")
+        self.assertEqual([c.args[0]["ts"] for c in self.emit.call_args_list], ["102"])
+
+    def test_channel_to_keeper_handoff_deduplicates(self):
+        m = message(101)
+        cli._publish_records(self.conf, "C1", [channels.mention_record("C1", m, "UBOT", "1.0")])
+        self._run_test_keeper([m, message(102)])
+        self.assertEqual([m["ts"] for m in threads.read_inbox("1.0", 0)], ["102"])
+
+    def test_legacy_keeper_inbox_counts_as_delivered(self):
+        threads.append_inbox("1.0", message(101), "hello")
+        cli._publish_records(self.conf, "C1", [channels.mention_record("C1", message(101), "UBOT", "1.0")])
+        self.emit.assert_not_called()
+        self.assertTrue(channels.load_state("delivered-C1")["101"])
+
+    def test_target_errors_do_not_stop_other_channels_or_threads(self):
+        channels.set_tracked("C1", "1.0", True)
+        def sleep(seconds):
+            if seconds == 10:
+                raise KeyboardInterrupt
+        for exc in (OSError("disk"), ValueError("json"), slack.SlackError("network_error", "history")):
+            with self.subTest(exc=exc), \
+                 patch.object(slack, "my_conversations", return_value=[{"id": c, "name": c, "private": False} for c in ("C1", "C2")]), \
+                 patch.object(cli, "_poll_channel_once", side_effect=[exc, None]) as poll, \
+                 patch.object(cli, "_poll_thread_once") as thread_poll, \
+                 patch.object(cli.time, "sleep", side_effect=sleep), \
+                 patch.object(cli, "print") as log:
+                cli.cmd_monitor(["--all"])
+                self.assertEqual([call.args[1] for call in poll.call_args_list], ["C1", "C2"])
+                thread_poll.assert_called_once()
+                self.assertIn("SLACK_UNREACHABLE", log.call_args.args[0])
+
+    def test_incremental_bot_streak_survives_restart_and_old_parent(self):
+        state = {"cursor": "100", "bot_streak": 4}
+        first, state = channels.thread_poll("C1", "1.0", state,
+            [message("1.0"), message(101, "UAGENT", bot_id="BOTHER")], "UBOT",
+            ["UOWNER"], ["UAGENT"])
+        self.assertEqual(len(first), 1)
+        channels.save_state("test-streak", state)
+        second, state = channels.thread_poll("C1", "1.0", channels.load_state("test-streak"),
+            [message("1.0"), message(102, "UAGENT", bot_id="BOTHER")], "UBOT",
+            ["UOWNER"], ["UAGENT"])
+        self.assertEqual(second, [])
+        third, state = channels.thread_poll("C1", "1.0", state,
+            [message(103), message(104, "UAGENT", bot_id="BOTHER")], "UBOT",
+            ["UOWNER"], ["UAGENT"])
+        self.assertEqual(len(third), 2)
+
+    def test_startup_always_requires_thread_monitor(self):
+        current = chat.Chat(channel="C1", thread_ts="1.0", deadline=time.time()+3600)
+        text = server._startup_lines(current, "ready")
+        self.assertIn("--thread", text)
+        self.assertNotIn("통합 Monitor가 없을 때만", text)
+
+    def test_versions_match(self):
+        import claude_slack_bridge
+        import tomllib
+        project = Path(__file__).resolve().parents[1]
+        version = tomllib.loads((project / "pyproject.toml").read_text())["project"]["version"]
+        self.assertEqual(claude_slack_bridge.__version__, version)
+        self.assertIn('version="' + version + '"', (project / "src/claude_slack_bridge/server.py").read_text())
+
+    def test_concurrent_handoff_writes_only_one_inbox(self):
+        import threading
+        barrier = threading.Barrier(2)
+        failures = []
+        def deliver(keeper):
+            try:
+                barrier.wait(timeout=3)
+                if keeper:
+                    channels.deliver_once("C1", "1.0", "101",
+                        lambda: threads.append_inbox("1.0", message(101), "hello"))
+                else:
+                    cli._publish_records(self.conf, "C1", [channels.mention_record("C1", message(101), "UBOT", "1.0")])
+            except BaseException as exc:
+                failures.append(exc)
+        workers = [threading.Thread(target=deliver, args=(keeper,)) for keeper in (True, False)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(failures, [])
+        self.assertEqual(len(threads.read_inbox("1.0", 0)) + self.emit.call_count, 1)
+
+    def test_one_tracked_thread_error_does_not_skip_next_thread(self):
+        channels.set_tracked("C1", "1.0", True)
+        channels.set_tracked("C1", "2.0", True)
+        def sleep(seconds):
+            if seconds == 10:
+                raise KeyboardInterrupt
+        with patch.object(slack, "my_conversations", return_value=[{"id": "C1", "name": "one", "private": False}]), \
+             patch.object(cli, "_poll_channel_once"), \
+             patch.object(cli, "_poll_thread_once", side_effect=[OSError("disk"), None]) as poll, \
+             patch.object(cli.time, "sleep", side_effect=sleep), \
+             patch.object(cli, "print"):
+            cli.cmd_monitor(["--all"])
+        self.assertEqual([call.args[2] for call in poll.call_args_list], ["1.0", "2.0"])

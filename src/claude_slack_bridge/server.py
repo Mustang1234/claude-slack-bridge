@@ -806,7 +806,7 @@ def _startup_lines(c: chatmod.Chat, keeper_status: str) -> str:
     script = shlex.join(threads.keeper_command(c.thread_ts, subcommand="monitor"))
     return (
         f"{keeper_status}\n"
-        "통합 Monitor가 없을 때만 Claude Code Monitor 툴(persistent)에 아래 명령을 넣는다:\n"
+        "Claude Code Monitor 툴(persistent)에 아래 명령을 그대로 넣는다:\n"
         f"{script}\n"
         "지킴이 기동은 서버가 하고(30초 주기), 이 명령의 60초 점검은 "
         "서버가 죽었을 때의 두 번째 층이다. THREAD_CLOSED 가 오면 Monitor 를 "

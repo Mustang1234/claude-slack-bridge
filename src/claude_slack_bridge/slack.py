@@ -79,7 +79,7 @@ def scrub_check(text: str) -> None:
 
 def api(token: str, method: str, payload: dict, form: bool = False) -> dict:
     for attempt in range(3):
-        with ratelimit.slot(token) as defer:
+        with ratelimit.slot(token, method) as defer:
             try:
                 return _api_once(token, method, payload, form)
             except SlackError as exc:
@@ -122,7 +122,7 @@ def _api_once(token: str, method: str, payload: dict, form: bool = False) -> dic
         if e.code == 429:
             error = SlackError("ratelimited", method)
             try:
-                error.retry_after = max(0.0, float(e.headers.get("Retry-After", "30")))
+                error.retry_after = ratelimit.retry_delay(e.headers.get("Retry-After", "30"))
             except (ValueError, TypeError):
                 error.retry_after = 30.0
             raise error from e

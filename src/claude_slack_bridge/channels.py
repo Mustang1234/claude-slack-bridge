@@ -297,9 +297,51 @@ def thread_poll(channel, thread, state, replies, bot_user_id, owners, listeners,
             continue
         if ts == thread or message.get("user") not in allowed:
             continue
+        # 증분 조회 이전의 연속 봇 수를 이어 붙인다. 처음에는 안전하게 제한값으로 시작한다.
+        prefix = [{"ts": str(-i - 1), "bot_id": "prior"}
+                  for i in range(int(state.get("bot_streak", chat.BOT_TURN_LIMIT)))]
+        context = prefix + [m for m in replies if float(m.get("ts", 0)) > float(state["cursor"])
+                            and str(m.get("ts")) != thread]
         if chat.is_for_me(message, bot_user_id, owners, require_mention=not any_reply,
-                          listeners=listeners, context=replies):
+                          listeners=listeners, context=context):
             record = mention_record(channel, message, bot_user_id, thread)
             record["files"] = message.get("files") or []
             out.append(record)
-    return out, {"cursor": cursor}
+    streak = int(state.get("bot_streak", chat.BOT_TURN_LIMIT))
+    for message in sorted(replies, key=lambda m: float(m.get("ts", 0))):
+        if float(message.get("ts", 0)) > float(state["cursor"]) and str(message.get("ts")) != thread:
+            streak = min(chat.BOT_TURN_LIMIT, streak + 1) if message.get("bot_id") else 0
+    return out, {"cursor": cursor, "bot_streak": streak}
+
+
+def deliver_once(channel, thread, message_ts, write):
+    """지킴이/감시자의 durable inbox를 전달 근거로 삼아 인계 중복을 막는다."""
+    import fcntl
+    _ensure_dir()
+    key = f"delivered-{channel}"
+    with open(lock_path(key), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        delivered = load_state(key)
+        ts = str(message_ts)
+        if ts in delivered:
+            return False
+        # 구버전 지킴이 기록 및 inbox append 후 ledger 저장 전 종료도 복구한다.
+        already = any(str(m.get("ts")) == ts for m in threads.read_inbox(thread, 0))
+        if not already:
+            try:
+                with open(inbox_path(channel), encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            record = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(record, dict) and str(record.get("ts")) == ts:
+                            already = True
+                            break
+            except FileNotFoundError:
+                pass
+        if not already:
+            write()
+        delivered[ts] = True
+        save_state(key, delivered)
+        return not already
