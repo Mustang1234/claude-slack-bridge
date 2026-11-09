@@ -625,7 +625,9 @@ def cmd_keeper(argv: list[str]) -> None:
     try:
         # keeper-start 는 프로세스가 살아 있는지만 확인하고 돌아온다. 인증이 느린 날
         # PID 기록까지 늦추면 바로 뒤의 watch가 지킴이가 없다고 오판한다.
-        bot_user_id = str(slack.auth_test(conf.bot_token).get("user_id", ""))
+        identity = slack.auth_test(conf.bot_token)
+        bot_user_id = str(identity.get("user_id", ""))
+        bot_id = str(identity.get("bot_id") or "")
         require_mention = bool(state.get("require_mention"))
         # 주인은 config.json 하나에서만 읽는다. 스레드 기록의 사본은 attach 경로가
         # 채우지 않아 비는 일이 있었고, 정본이 둘이면 어느 쪽이 맞는지부터 따져야 한다.
@@ -748,7 +750,7 @@ def cmd_keeper(argv: list[str]) -> None:
             fresh = [
                 m for m in msgs
                 if float(m.get("ts", 0)) > seen
-                and chat.is_for_me(m, bot_user_id, owner_id, require_mention, listeners)
+                and chat.is_for_me(m, bot_user_id, owner_id, require_mention, listeners, bot_id)
             ]
             fresh.sort(key=lambda m: float(m.get("ts", 0)))
 
@@ -838,7 +840,7 @@ def cmd_keeper(argv: list[str]) -> None:
 
             _check_session_health(
                 conf.bot_token, channel, thread, msgs,
-                bot_user_id, owner_id, require_mention, listeners, health,
+                bot_user_id, owner_id, require_mention, listeners, health, bot_id=bot_id,
             )
 
             time.sleep(interval)
@@ -852,7 +854,7 @@ def cmd_keeper(argv: list[str]) -> None:
 
 def _effective_listeners(channel: str, state: dict) -> list[str]:
     """채널 전체 권한과 현재 스레드 권한만 합친다."""
-    return list(dict.fromkeys(cfg.channel_listeners(channel) + (state.get("listeners") or [])))
+    return chat.effective_listeners(channel, state)
 
 
 def _safe_patch(thread: str, **fields) -> bool:
@@ -916,6 +918,7 @@ def _check_session_health(
     require_mention: bool,
     listeners: list[str],
     cache: dict,
+    bot_id: str = "",
 ) -> None:
     """세션이 사용자의 말을 받고 있는지 보고, 아니면 폰에 드러낸다.
 
@@ -950,7 +953,7 @@ def _check_session_health(
         mine = [
             float(m.get("ts", 0)) for m in msgs
             if chat.is_for_me(
-                m, bot_user_id, owner_id, require_mention, listeners,
+                m, bot_user_id, owner_id, require_mention, listeners, bot_id,
             )
             and not chat.parse_command(
                 chat.strip_mention(m.get("text", ""), bot_user_id)
