@@ -27,15 +27,19 @@ Socket Mode 나 Events API 를 쓰면 토큰이 둘로 늘고 설치 단계가 �
 |---|---|---|
 | 용도 | 혼자 쓰는 개인 에이전트 | 팀 채널에서 여러 사람·에이전트가 같이 쓰는 팀 에이전트 |
 | 브랜치 | `main` | `team` |
-| 태그 | `v<버전>` (예: `v1.4.4`) | `team-v<버전>` (예: `team-v1.5.0`) |
+| 최신 stable 태그 | `latest` | `team-latest` |
+| 버전 태그 | `v<버전>` (예: `v1.4.4`) | `team-v<버전>` (예: `team-v1.5.1`) |
 | team 에만 있는 기능 | — | 채널 멘션 모니터, 복수 owner, 머리글 보호 |
 
-아래 명령의 `<태그>` 를 고른 쪽의 **최신 태그**로 바꾼다. 태그 목록은
+아래 명령의 `<태그>` 자리에 보통은 **`latest` 또는 `team-latest`** 를 넣는다. 특정 버전에
+머물러야 할 때만 버전 태그를 쓴다. 태그 목록은
 [Tags](https://github.com/Mustang1234/claude-slack-bridge/tags) 에 있다.
 
-- 태그 없이 받으면 `main` 의 개발 중인 코드가 설치된다. 쓰는 용도의 stable 태그를 고정한다.
-- personal ↔ team 을 바꿀 때도 태그만 바꾸면 된다. 버전이 다르므로 uvx 가 새로 설치한다.
-  `init` 과 `claude mcp add` 의 태그는 같은 것으로 맞춘다.
+- `latest`·`team-latest` 는 릴리스 때마다 새 stable 커밋으로 옮겨진다. 버전 태그는 한 번
+  달면 옮기지도 지우지도 않는다.
+- 태그 없이 받으면 `main` 의 개발 중인 코드가 설치된다. 반드시 태그를 붙인다.
+- personal ↔ team 을 바꿀 때도 태그만 바꾸면 된다. `init` 과 `claude mcp add` 의 태그는
+  같은 것으로 맞춘다.
 
 ```bash
 # 1) Slack 앱 등록 + 토큰 발급 + 멤버 ID와 목적지 준비 — docs/SETUP.md 참고
